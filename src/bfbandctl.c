@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #define DEFAULT_SOCKET "/run/bfban/bfban.sock"
+#define REQUEST_SIZE 65536
 
 static const char *socket_path(void)
 {
@@ -25,7 +26,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "Usage: bfbandctl ping|init|add IP [TTL]|add-many FILE|remove IP|list|flush\n");
         return 2;
     }
-    char request[256];
+    char request[REQUEST_SIZE];
     if (strcmp(argv[1], "add") == 0 && (argc == 3 || argc == 4))
         snprintf(request, sizeof(request), "ADD %s %s", argv[2], argc == 4 ? argv[3] : "0");
     else if (strcmp(argv[1], "remove") == 0 && argc == 3)
