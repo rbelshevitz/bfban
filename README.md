@@ -485,11 +485,15 @@ For a local regression run:
 make test
 ```
 
-The test build enables private fault-injection hooks. As root, it exercises
-backend failure on a selected operation, failed state persistence before and
-after `rename()`, batch rollback, reconciliation blocking, CIDR handling, and
-the daemon request timeout. Without root, the basic CLI checks still run and
-the root-only daemon cases are reported as `SKIP`, not `PASS`.
+The test build enables private fault-injection hooks and a stateful fake
+kernel-set. As root, it exercises backend failure on a selected operation,
+failed state persistence before and after `rename()`, batch rollback,
+reconciliation blocking, CIDR handling, daemon request timeout, and restart
+reconciliation. It compares the fake kernel-set with both `LIST` output and
+the saved state file. Direct libbpfilter mode is explicitly disabled for this
+test; the production direct path is covered by the separate libbpfilter build
+and the validation lab. Without root, the basic CLI checks still run and the
+root-only daemon cases are reported as `SKIP`, not `PASS`.
 
 ## Memory and limitations
 

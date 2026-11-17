@@ -35,11 +35,14 @@ grep -F '198.51.100.0/24' "$BFBAN_STATE" >/dev/null
 socket_path="$test_dir/bfban.sock"
 daemon_state="$test_dir/daemon.state"
 backend_log="$test_dir/backend.log"
+backend_state="$test_dir/backend.state"
 export BFBAN_SOCKET="$socket_path"
 export BFBAN_DAEMON_STATE="$daemon_state"
 export BFBAN_BIN=/bin/true
 export BFBAN_CHAIN=bfban_test
 export BFBAN_TEST_BACKEND_LOG="$backend_log"
+export BFBAN_TEST_BACKEND_STATE="$backend_state"
+export BFBAN_DIRECT=no
 
 start_daemon() {
     rm -f "$socket_path"
@@ -71,7 +74,10 @@ if [ "$(id -u)" -eq 0 ]; then
     "$ctl" add 198.51.100.11 >/dev/null
     list=$("$ctl" list)
     grep -F '198.51.100.11' "$daemon_state" >/dev/null
+    grep -Fx '198.51.100.11' "$backend_state" >/dev/null
     test "$(printf '%s\n' "$list" | grep -c '^198.51.100.11 ')" -eq 1
+    printf '%s\n' "$list" > "$test_dir/list"
+    cmp -s "$test_dir/list" "$daemon_state"
     ! printf '%s\n' "$list" | grep -F '198.51.100.10' >/dev/null
 
     python3 - "$socket_path" <<'PY'
@@ -91,8 +97,8 @@ sock.close()
 PY
 
     stop_daemon
-    rm -f "$daemon_state" "$backend_log"
-    export BFBAN_TEST_FAIL_SAVE_STAGE=before_rename
+    rm -f "$daemon_state" "$backend_log" "$backend_state"
+    export BFBAN_TEST_FAIL_SAVE_AT=1
     start_daemon
     if "$ctl" add 198.51.100.20 >/dev/null 2>&1; then
         echo "expected save failure was accepted" >&2
@@ -100,10 +106,14 @@ PY
     fi
     grep -F 'add 198.51.100.20' "$backend_log" >/dev/null
     grep -F 'remove 198.51.100.20' "$backend_log" >/dev/null
+    test ! -s "$backend_state"
+    test ! -s "$daemon_state"
     "$ctl" ping >/dev/null
 
     stop_daemon
-    rm -f "$daemon_state" "$backend_log"
+    rm -f "$daemon_state" "$backend_log" "$backend_state"
+    unset BFBAN_TEST_FAIL_SAVE_AT
+    export BFBAN_TEST_FAIL_SAVE_STAGE=before_rename
     export BFBAN_TEST_FAIL_BACKEND_COMMAND=remove
     export BFBAN_TEST_FAIL_BACKEND_AT=1
     start_daemon
@@ -115,12 +125,14 @@ PY
         echo "reconciliation mode did not block mutation" >&2
         exit 1
     fi
+    grep -Fx '198.51.100.21' "$backend_state" >/dev/null
+    test ! -s "$daemon_state"
     "$ctl" init >/dev/null
-    unset BFBAN_TEST_FAIL_BACKEND_COMMAND BFBAN_TEST_FAIL_BACKEND_AT
+    unset BFBAN_TEST_FAIL_BACKEND_COMMAND BFBAN_TEST_FAIL_BACKEND_AT BFBAN_TEST_FAIL_SAVE_STAGE
 
     stop_daemon
-    rm -f "$daemon_state" "$backend_log"
-    export BFBAN_TEST_FAIL_SAVE_STAGE=
+    rm -f "$daemon_state" "$backend_log" "$backend_state"
+    unset BFBAN_TEST_FAIL_SAVE_STAGE
     export BFBAN_TEST_FAIL_BACKEND_COMMAND=add
     export BFBAN_TEST_FAIL_BACKEND_AT=2
     start_daemon
@@ -130,16 +142,25 @@ PY
         exit 1
     fi
     test ! -s "$daemon_state"
+    test ! -s "$backend_state"
     test "$(grep -c '^remove ' "$backend_log")" -eq 2
     unset BFBAN_TEST_FAIL_BACKEND_COMMAND BFBAN_TEST_FAIL_BACKEND_AT
 
     stop_daemon
-    rm -f "$daemon_state" "$backend_log"
+    rm -f "$daemon_state" "$backend_log" "$backend_state"
     export BFBAN_TEST_FAIL_SAVE_STAGE=after_rename
     start_daemon
     "$ctl" add 203.0.113.10 >/dev/null
     grep -F '203.0.113.10' "$daemon_state" >/dev/null
+    grep -Fx '203.0.113.10' "$backend_state" >/dev/null
     unset BFBAN_TEST_FAIL_SAVE_STAGE
+    stop_daemon
+    start_daemon
+    list=$("$ctl" list)
+    test "$(printf '%s\n' "$list" | grep -c '^203.0.113.10 ')" -eq 1
+    printf '%s\n' "$list" > "$test_dir/list"
+    cmp -s "$test_dir/list" "$daemon_state"
+    grep -Fx '203.0.113.10' "$backend_state" >/dev/null
     stop_daemon
     echo "bfband fault-injection tests: PASS"
 else

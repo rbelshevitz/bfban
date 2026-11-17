@@ -54,7 +54,8 @@ applies them to the bpfilter chain.
 - [x] TCP backlog, buffer, SYN-cookie, and memory guidance.
 - [x] English and Russian deployment, Fail2ban, rollback, and troubleshooting docs.
 - [x] Test-only fault injection for backend calls and state-save boundaries,
-  with explicit root-only `PASS`/`SKIP` reporting in `make test`.
+  with a stateful fake kernel-set, restart reconciliation checks, direct-mode
+  isolation, and explicit root-only `PASS`/`SKIP` reporting in `make test`.
 
 ## Release gates
 

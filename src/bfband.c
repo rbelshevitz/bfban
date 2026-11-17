@@ -46,6 +46,79 @@ static bool reconciliation_needed;
 static unsigned long test_backend_calls;
 static unsigned long test_save_calls;
 
+static int test_backend_set(const char *command, const char *ip)
+{
+    const char *path = getenv("BFBAN_TEST_BACKEND_STATE");
+    char line[MAX_KEY + 2];
+    if (!path || !*path || strcmp(command, "init") == 0) return 0;
+    if (strcmp(command, "flush") == 0) {
+        FILE *f = fopen(path, "w");
+        if (!f) return -errno;
+        if (fclose(f) != 0) return -errno;
+        return 0;
+    }
+    if (strcmp(command, "add") == 0) {
+        FILE *f = fopen(path, "r");
+        if (f) {
+            while (fgets(line, sizeof(line), f)) {
+                line[strcspn(line, "\r\n")] = '\0';
+                if (strcmp(line, ip) == 0) {
+                    fclose(f);
+                    return 0;
+                }
+            }
+            fclose(f);
+        } else if (errno != ENOENT) return -errno;
+        f = fopen(path, "a");
+        if (!f) return -errno;
+        if (fprintf(f, "%s\n", ip) < 0) {
+            int e = errno ? errno : EIO;
+            fclose(f);
+            return -e;
+        }
+        if (fclose(f) != 0) return -errno;
+        return 0;
+    }
+    if (strcmp(command, "remove") == 0) {
+        char temp[PATH_MAX];
+        FILE *in = fopen(path, "r");
+        if (!in) return errno == ENOENT ? 0 : -errno;
+        if (snprintf(temp, sizeof(temp), "%s.tmp.%ld", path, (long)getpid()) >=
+            (int)sizeof(temp)) {
+            fclose(in);
+            return -ENAMETOOLONG;
+        }
+        FILE *out = fopen(temp, "w");
+        if (!out) {
+            int e = errno;
+            fclose(in);
+            return -e;
+        }
+        while (fgets(line, sizeof(line), in)) {
+            line[strcspn(line, "\r\n")] = '\0';
+            if (strcmp(line, ip) != 0 && fprintf(out, "%s\n", line) < 0) {
+                int e = errno ? errno : EIO;
+                fclose(in); fclose(out); unlink(temp);
+                return -e;
+            }
+        }
+        int input_error = ferror(in) ? (errno ? errno : EIO) : 0;
+        int output_error = fclose(out) != 0 ? (errno ? errno : EIO) : 0;
+        fclose(in);
+        if (input_error || output_error) {
+            unlink(temp);
+            return -(input_error ? input_error : output_error);
+        }
+        if (rename(temp, path) < 0) {
+            int e = errno;
+            unlink(temp);
+            return -e;
+        }
+        return 0;
+    }
+    return -EINVAL;
+}
+
 static int test_number(const char *name, unsigned long *counter)
 {
     const char *value = getenv(name);
@@ -71,8 +144,10 @@ static int test_backend_call(const char *command, const char *ip)
     }
     if (fclose(log) != 0) return -errno;
     const char *fail_command = getenv("BFBAN_TEST_FAIL_BACKEND_COMMAND");
-    if (fail_command && strcmp(fail_command, command) != 0) return 0;
-    return test_number("BFBAN_TEST_FAIL_BACKEND_AT", &test_backend_calls);
+    if ((!fail_command || strcmp(fail_command, command) == 0) &&
+        test_number("BFBAN_TEST_FAIL_BACKEND_AT", &test_backend_calls) < 0)
+        return -EIO;
+    return test_backend_set(command, ip);
 }
 #endif
 
@@ -378,12 +453,11 @@ static int save(const struct entry *entries, size_t count)
             fclose(f); unlink(temp); return -e;
         }
     }
-    int flush_result = fflush(f);
-    int file_sync_result = flush_result == 0 ? fsync(fileno(f)) : -1;
-    int close_result = fclose(f);
-    if (flush_result != 0 || file_sync_result < 0 || close_result != 0) {
-        int e = errno; unlink(temp); return -e;
-    }
+    int save_error = 0;
+    if (fflush(f) != 0) save_error = errno ? errno : EIO;
+    if (!save_error && fsync(fileno(f)) < 0) save_error = errno ? errno : EIO;
+    if (fclose(f) != 0 && !save_error) save_error = errno ? errno : EIO;
+    if (save_error) { unlink(temp); return -save_error; }
 #ifdef BFBAN_TEST_HOOKS
     if (test_number("BFBAN_TEST_FAIL_SAVE_AT", &test_save_calls) < 0 ||
         fail_before_rename) {
