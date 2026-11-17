@@ -666,10 +666,10 @@ int main(void)
     if (!entries || !index) { free(entries); free(index); return 1; }
     size_t count;
     int r = load(entries, &count, index);
-    if (r < 0) { free(entries); free(index); return 1; }
+    if (r < 0) { fprintf(stderr, "bfband: could not load state: %s\n", strerror(-r)); free(entries); free(index); return 1; }
 #ifdef BFBAN_WITH_LIBBPFILTER
     r = direct_setup();
-    if (r < 0) { free(entries); free(index); return 1; }
+    if (r < 0) { fprintf(stderr, "bfband: could not initialize kernel backend: %s\n", strerror(-r)); free(entries); free(index); return 1; }
 #endif
     bool changed = false;
     for (size_t i = 0; i < count; ++i) {
@@ -691,15 +691,17 @@ int main(void)
         }
     }
     r = reconcile_kernel(entries, count);
-    if (r < 0) { free(entries); free(index); return 1; }
-    if (parent_dir(sock_path()) < 0) { free(entries); free(index); return 1; }
+    if (r < 0) { fprintf(stderr, "bfband: could not reconcile kernel state: %s\n", strerror(-r)); free(entries); free(index); return 1; }
+    r = parent_dir(sock_path());
+    if (r < 0) { fprintf(stderr, "bfband: could not create socket directory: %s\n", strerror(-r)); free(entries); free(index); return 1; }
     int server = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (server < 0) { free(entries); free(index); return 1; }
+    if (server < 0) { fprintf(stderr, "bfband: socket: %s\n", strerror(errno)); free(entries); free(index); return 1; }
     unlink(sock_path());
     struct sockaddr_un addr = {.sun_family = AF_UNIX};
     if (strlen(sock_path()) >= sizeof(addr.sun_path)) { close(server); free(entries); free(index); return 1; }
     strcpy(addr.sun_path, sock_path());
     if (bind(server, (struct sockaddr *)&addr, sizeof(addr)) < 0 || listen(server, 32) < 0) {
+        fprintf(stderr, "bfband: bind/listen: %s\n", strerror(errno));
         close(server); free(entries); free(index); return 1;
     }
     chmod(sock_path(), 0660);

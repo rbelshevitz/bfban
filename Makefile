@@ -8,7 +8,7 @@ BUILD_DIR ?= build
 BFBAN_DIRECT_CFLAGS ?=
 BFBAN_DIRECT_LIBS ?=
 
-.PHONY: all clean install
+.PHONY: all clean install test
 
 all: $(BUILD_DIR)/bfban $(BUILD_DIR)/bfband $(BUILD_DIR)/bfbandctl $(BUILD_DIR)/bfobserve
 
@@ -55,3 +55,6 @@ install: all $(BUILD_DIR)/etc/bfban/bfban.env $(BUILD_DIR)/etc/systemd/bfband.se
 
 clean:
 	rm -rf $(BUILD_DIR)
+
+test: all
+	sh scripts/test-faults.sh $(BUILD_DIR)
