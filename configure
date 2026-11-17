@@ -1,0 +1,39 @@
+#!/bin/sh
+set -eu
+
+prefix=/usr/local
+cc=${CC:-cc}
+
+for arg in "$@"; do
+    case "$arg" in
+        --prefix=*) prefix=${arg#*=} ;;
+        --help) echo "Usage: ./configure [--prefix=PATH]"; exit 0 ;;
+        *) echo "configure: unknown option: $arg" >&2; exit 2 ;;
+    esac
+done
+
+command -v "$cc" >/dev/null 2>&1 || {
+    echo "configure: compiler not found: $cc" >&2
+    exit 1
+}
+
+direct_cflags=
+direct_libs=
+if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists bpfilter; then
+    direct_cflags="$(pkg-config --cflags bpfilter) -DBFBAN_WITH_LIBBPFILTER"
+    direct_libs="$(pkg-config --libs bpfilter)"
+    echo "libbpfilter: enabled"
+else
+    echo "libbpfilter: not found; bfband will use bfcli subprocess fallback"
+fi
+
+cat > config.mk <<EOF
+PREFIX := $prefix
+CC := $cc
+BFBAN_DIRECT_CFLAGS := $direct_cflags
+BFBAN_DIRECT_LIBS := $direct_libs
+EOF
+
+echo "prefix: $prefix"
+echo "compiler: $cc"
+echo "Run 'make' to build."
