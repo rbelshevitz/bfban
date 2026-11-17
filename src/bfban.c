@@ -20,6 +20,9 @@
 #define DEFAULT_SET "banlist"
 #define DEFAULT_HOOK "BF_HOOK_NF_LOCAL_IN{priorities=101-102}"
 #define MAX_KEY 64
+#define MAX_BATCH 2048
+
+struct batch_item { char address[MAX_KEY]; const char *set_name; };
 
 static const char *env_or(const char *name, const char *fallback)
 {
@@ -35,7 +38,7 @@ static const char *hook_name(void) { return env_or("BFBAN_HOOK", DEFAULT_HOOK); 
 static void usage(FILE *stream)
 {
     fprintf(stream,
-            "Usage: bfban init|add ADDRESS|remove ADDRESS|list|flush\n"
+            "Usage: bfban init|add ADDRESS|add-many FILE|remove ADDRESS|list|flush\n"
             "Environment: BFBAN_BPFCLI, BFBAN_STATE, BFBAN_CHAIN, BFBAN_HOOK\n");
 }
 
@@ -147,6 +150,96 @@ static int write_state_with(const char *address, bool add)
     return 0;
 }
 
+static int compare_batch_items(const void *left, const void *right)
+{
+    const struct batch_item *a = left, *b = right;
+    return strcmp(a->address, b->address);
+}
+
+static int update_set_many(const char *set_name,
+                           const struct batch_item *items, size_t count)
+{
+    char **argv = calloc(8 + count * 2, sizeof(*argv));
+    if (!argv) return -ENOMEM;
+    size_t i = 0;
+    argv[i++] = (char *)bfcli_path(); argv[i++] = "chain";
+    argv[i++] = "update-set"; argv[i++] = "--name";
+    argv[i++] = (char *)chain_name(); argv[i++] = "--set-name";
+    argv[i++] = (char *)set_name;
+    for (size_t n = 0; n < count; ++n) {
+        argv[i++] = "--add";
+        argv[i++] = (char *)items[n].address;
+    }
+    int r = run_bfcli(argv);
+    free(argv);
+    return r;
+}
+
+static int write_state_batch(const struct batch_item *items, size_t count)
+{
+    int r = ensure_parent();
+    if (r < 0) return r;
+    char temporary[PATH_MAX];
+    if (snprintf(temporary, sizeof(temporary), "%s.tmp.%ld", state_path(),
+                 (long)getpid()) >= (int)sizeof(temporary)) return -ENAMETOOLONG;
+    FILE *input = fopen(state_path(), "r");
+    FILE *output = fopen(temporary, "w");
+    if (!output) { if (input) fclose(input); return -errno; }
+    char line[MAX_KEY + 2];
+    if (input) {
+        while (fgets(line, sizeof(line), input)) fputs(line, output);
+        fclose(input);
+    }
+    for (size_t i = 0; i < count; ++i)
+        if (!state_contains(items[i].address)) fprintf(output, "%s\n", items[i].address);
+    if (fclose(output) != 0 || rename(temporary, state_path()) < 0) {
+        int e = errno; unlink(temporary); return -e;
+    }
+    return 0;
+}
+
+static int add_many(const char *path)
+{
+    FILE *file = fopen(path, "r");
+    if (!file) return -errno;
+    struct batch_item items[MAX_BATCH];
+    size_t count = 0;
+    char line[MAX_KEY + 128];
+    while (fgets(line, sizeof(line), file)) {
+        char address[MAX_KEY];
+        if (sscanf(line, "%63s", address) != 1 || address[0] == '#') continue;
+        const char *set_name = set_for_address(address);
+        if (!set_name) {
+            fclose(file);
+            fprintf(stderr, "bfban: invalid address: %s\n", address);
+            return -EINVAL;
+        }
+        if (count == MAX_BATCH) { fclose(file); return -E2BIG; }
+        snprintf(items[count].address, sizeof(items[count].address), "%s", address);
+        items[count++].set_name = set_name;
+    }
+    fclose(file);
+    if (!count) return 0;
+    qsort(items, count, sizeof(*items), compare_batch_items);
+    size_t unique = 1;
+    for (size_t i = 1; i < count; ++i)
+        if (strcmp(items[i].address, items[unique - 1].address) != 0)
+            items[unique++] = items[i];
+    const char *sets[] = {"banlist4", "banlist4net", "banlist6", "banlist6net"};
+    for (size_t s = 0; s < sizeof(sets) / sizeof(sets[0]); ++s) {
+        struct batch_item group[MAX_BATCH];
+        size_t group_count = 0;
+        for (size_t i = 0; i < unique; ++i)
+            if (strcmp(items[i].set_name, sets[s]) == 0) group[group_count++] = items[i];
+        for (size_t offset = 0; offset < group_count; offset += MAX_BATCH) {
+            size_t chunk = group_count - offset > MAX_BATCH ? MAX_BATCH : group_count - offset;
+            int r = update_set_many(sets[s], group + offset, chunk);
+            if (r < 0) return r;
+        }
+    }
+    return write_state_batch(items, unique);
+}
+
 static int init_chain(void)
 {
     char definition[PATH_MAX];
@@ -216,6 +309,8 @@ int main(int argc, char **argv)
         bool add = strcmp(argv[1], "add") == 0;
         if (!add && !state_contains(argv[2])) return 0;
         r = update_address(argv[2], add);
+    } else if (strcmp(argv[1], "add-many") == 0 && argc == 3) {
+        r = add_many(argv[2]);
     } else if (strcmp(argv[1], "list") == 0 && argc == 2) {
         r = list_addresses();
     } else if (strcmp(argv[1], "flush") == 0 && argc == 2) {

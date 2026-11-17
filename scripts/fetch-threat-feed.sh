@@ -29,9 +29,7 @@ echo "feed saved temporarily as $output"
 
 if [ "$apply" -eq 1 ]; then
     command -v bfban >/dev/null 2>&1 || { echo "bfban is required for --apply" >&2; exit 1; }
-    while IFS= read -r ip; do
-        [ -n "$ip" ] && bfban add "$ip"
-    done < "$output"
+    bfban add-many "$output"
     echo "applied $count addresses to bfban"
 else
     echo "not applied; review the feed and rerun with --apply if appropriate"

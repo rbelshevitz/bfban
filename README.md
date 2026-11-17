@@ -80,6 +80,7 @@ sudo bfban add 203.0.113.0/24     # IPv4 prefix
 sudo bfban add 2001:db8::1        # one IPv6 address
 sudo bfban add 2001:db8::/32      # IPv6 prefix
 sudo bfban list
+sudo bfban add-many /path/to/addresses.txt  # one batch update
 ```
 
 Internally, `bfban init` creates four independent sets. Exact addresses use
@@ -94,6 +95,10 @@ hash-style sets; `ip4.snet` and `ip6.snet` use bpfilter's prefix/LPM set form:
 
 The network is not expanded into thousands of individual addresses. CIDR
 entries are persisted in the state file and restored by `bfband` after restart.
+`add-many` validates and deduplicates an input file, groups entries by set type,
+and performs one `chain update-set` per group (in chunks if needed). This is
+cheaper than invoking `bfban add` once per feed line. Each group update is
+atomic; a multi-group file is not one global transaction.
 
 ## Step-by-step deployment
 
