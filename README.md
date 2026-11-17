@@ -53,6 +53,45 @@ operator bans it, and state recovery lets the dynamic list survive a daemon
 restart. Automatic detection and upstream DDoS mitigation are outside the
 current scope.
 
+## Anti-DDoS role
+
+`bfban` is the enforcement stage of a layered anti-DDoS workflow:
+
+```text
+traffic/logs/feed
+       |
+       v
+detection and decision: Fail2ban, CrowdSec, operator, threat feed
+       |
+       v
+bfban: exact IP/CIDR set update
+       |
+       v
+bpfilter: DROP at the selected kernel hook
+```
+
+| Situation | What bfban does | What it cannot do |
+|---|---|---|
+| Known malicious IP or CIDR | applies a L3/L4 deny entry | discover the IOC by itself |
+| SSH/web brute force | receives a Fail2ban decision and enforces it | parse logs or choose thresholds |
+| High-PPS source visible on the host | `bfobserve` shows top sources; operator can apply a ban | guarantee every packet is visible or auto-classify an attack |
+| Distributed/spoofed flood | can drop known sources at the chosen hook | stop spoofed sources or restore a saturated uplink |
+| Saturated provider link | provides no local remedy | replace provider filtering/scrubbing |
+
+The default hook is `NF_LOCAL_IN`, so the default profile protects services
+delivered to this host. It is not a router-wide DDoS filter. For earlier ingress
+drop on a supported interface, configure XDP explicitly:
+
+```sh
+export BFBAN_HOOK='BF_HOOK_XDP{ifindex=2}'
+sudo bfban init
+```
+
+Use the actual interface index from `bfobserve --list-interfaces`, keep a
+management path outside the test interface, and benchmark native and generic
+XDP separately. XDP can reduce host-side work; it cannot increase the capacity
+of an already saturated network link.
+
 ## Why this exists
 
 Fail2ban is good at detection and ban lifetime management. A firewall backend
