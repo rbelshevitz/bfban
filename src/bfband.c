@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 
+#define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
 #include <arpa/inet.h>
@@ -386,13 +387,35 @@ static int add_many(const char *const *addresses, size_t item_count,
     return save(entries, *count);
 }
 
+static int reconcile_kernel(const struct entry *entries, size_t count)
+{
+    int r = run_bfban("init", NULL);
+    if (r < 0) return r;
+    if (!count) return 0;
+#ifdef BFBAN_WITH_LIBBPFILTER
+    if (direct_enabled) {
+        const char **addresses = calloc(count, sizeof(*addresses));
+        if (!addresses) return -ENOMEM;
+        for (size_t i = 0; i < count; ++i) addresses[i] = entries[i].ip;
+        r = direct_update_many(addresses, count, true);
+        free(addresses);
+        return r;
+    }
+#endif
+    for (size_t i = 0; i < count; ++i) {
+        r = run_bfban("add", entries[i].ip);
+        if (r < 0) return r;
+    }
+    return 0;
+}
+
 static int request(const char *line, struct entry *entries, size_t *count,
                    struct index_slot *index, char *response, size_t size)
 {
     char cmd[16], ip[MAX_KEY]; long long ttl = 0;
     if (sscanf(line, "%15s", cmd) != 1) return -EINVAL;
     if (strcmp(cmd, "PING") == 0) return 1;
-    if (strcmp(cmd, "INIT") == 0) return run_bfban("init", NULL);
+    if (strcmp(cmd, "INIT") == 0) return reconcile_kernel(entries, *count);
     if (strcmp(cmd, "FLUSH") == 0) {
         int r = run_bfban("flush", NULL); if (r < 0) return r;
         *count = 0; unlink(state_path()); return 0;
@@ -460,8 +483,6 @@ int main(void)
     size_t count;
     int r = load(entries, &count, index);
     if (r < 0) { free(entries); free(index); return 1; }
-    r = run_bfban("init", NULL);
-    if (r < 0) { free(entries); free(index); return 1; }
 #ifdef BFBAN_WITH_LIBBPFILTER
     r = direct_setup();
     if (r < 0) { free(entries); free(index); return 1; }
@@ -475,10 +496,10 @@ int main(void)
             changed = true;
             continue;
         }
-        r = run_bfban("add", entries[i].ip);
-        if (r < 0) { free(entries); free(index); return 1; }
     }
     if (changed) { rebuild_index(entries, count, index); (void)save(entries, count); }
+    r = reconcile_kernel(entries, count);
+    if (r < 0) { free(entries); free(index); return 1; }
     if (parent_dir(sock_path()) < 0) { free(entries); free(index); return 1; }
     int server = socket(AF_UNIX, SOCK_STREAM, 0);
     if (server < 0) { free(entries); free(index); return 1; }
@@ -502,6 +523,14 @@ int main(void)
         if (poll(&pfd, 1, 1000) <= 0) continue;
         int client = accept(server, NULL, NULL);
         if (client < 0) continue;
+        struct ucred peer;
+        socklen_t peer_length = sizeof(peer);
+        if (getsockopt(client, SOL_SOCKET, SO_PEERCRED, &peer, &peer_length) < 0 ||
+            peer.uid != 0) {
+            (void)dprintf(client, "ERR Permission denied\n");
+            close(client);
+            continue;
+        }
         char line[BUFSIZE] = {0}, response[BUFSIZE] = {0};
         ssize_t n = read_request(client, line, sizeof(line));
         int result = n > 0 ? request(line, entries, &count, index, response, sizeof(response)) : -EINVAL;

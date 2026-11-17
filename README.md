@@ -291,6 +291,10 @@ If native XDP drops a packet before the normal stack, it may not appear in
 `tcpdump`. The current observer is not an XDP telemetry map; that is future
 work.
 
+TCP queue, window, SYN-cookie, and memory guidance is in
+[`docs/tcp-ddos-tuning.md`](docs/tcp-ddos-tuning.md). `bfban` does not replace
+TCP backlog tuning or upstream mitigation when the uplink itself is saturated.
+
 ### 7. Apply CIDR or a threat feed carefully
 
 ```sh

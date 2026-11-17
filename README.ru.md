@@ -323,6 +323,10 @@ NIC → XDP observe map → userspace top-N → operator decision → bfban bloc
 
 Это разделяет detection и enforcement и снижает риск самоблокировки.
 
+Методика по TCP-очередям, окнам, SYN-cookie и памяти описана в
+[`docs/tcp-ddos-tuning.md`](docs/tcp-ddos-tuning.md). `bfban` не заменяет
+настройку backlog и upstream-фильтрацию, если перегружен сам uplink.
+
 ## Wow-фича: `bfobserve`
 
 `bfobserve` — read-only режим расследования: он не блокирует адреса, а
