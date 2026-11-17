@@ -35,6 +35,31 @@ Fail2ban / CrowdSec / свой агент
 Режим выбирается через `BFBAN_DIRECT=auto|yes|no`, а путь к bpffs — через
 `BFBAN_BPFFS`.
 
+## CIDR — полноценная поддержка сетей
+
+CIDR — это рабочий формат ввода, а не только пример в документации:
+
+```sh
+sudo bfban add 203.0.113.10       # один IPv4-адрес
+sudo bfban add 203.0.113.0/24     # IPv4-префикс
+sudo bfban add 2001:db8::1        # один IPv6-адрес
+sudo bfban add 2001:db8::/32      # IPv6-префикс
+sudo bfban list
+```
+
+При `bfban init` создаются четыре независимых набора:
+
+| Ввод | bpfilter set | Matcher |
+|---|---|---|
+| IPv4-адрес | `banlist4` | `ip4.saddr` |
+| IPv4 CIDR | `banlist4net` | `ip4.snet` |
+| IPv6-адрес | `banlist6` | `ip6.saddr` |
+| IPv6 CIDR | `banlist6net` | `ip6.snet` |
+
+Точные адреса и префиксы разделены: сеть не разворачивается в тысячи
+отдельных IP, а проверяется через prefix/LPM set bpfilter. CIDR сохраняется в
+state-файле и восстанавливается `bfband` после перезапуска.
+
 ## Конфигурация и установка
 
 Для этого небольшого проекта отдельный Autotools/CMake не нужен: есть POSIX

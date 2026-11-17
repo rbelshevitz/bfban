@@ -48,6 +48,32 @@ banlist6net   IPv6 CIDR networks
 This is a dynamic L3/L4 deny-list layer, not a replacement for stateful
 nftables/iptables policy, NAT, conntrack, or upstream DDoS scrubbing.
 
+## CIDR blocklists
+
+CIDR is a first-class input format, not just a documentation example. The
+daemon accepts exact addresses and prefixes for both address families:
+
+```sh
+sudo bfban add 203.0.113.10       # one IPv4 address
+sudo bfban add 203.0.113.0/24     # IPv4 prefix
+sudo bfban add 2001:db8::1        # one IPv6 address
+sudo bfban add 2001:db8::/32      # IPv6 prefix
+sudo bfban list
+```
+
+Internally, `bfban init` creates four independent sets. Exact addresses use
+hash-style sets; `ip4.snet` and `ip6.snet` use bpfilter's prefix/LPM set form:
+
+| Input | bpfilter set | Matcher |
+|---|---|---|
+| IPv4 address | `banlist4` | `ip4.saddr` |
+| IPv4 CIDR | `banlist4net` | `ip4.snet` |
+| IPv6 address | `banlist6` | `ip6.saddr` |
+| IPv6 CIDR | `banlist6net` | `ip6.snet` |
+
+The network is not expanded into thousands of individual addresses. CIDR
+entries are persisted in the state file and restored by `bfband` after restart.
+
 ## Step-by-step deployment
 
 ### 1. Check the host
