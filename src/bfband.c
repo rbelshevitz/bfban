@@ -344,13 +344,20 @@ static int save(const struct entry *entries, size_t count)
     }
     if (rename(temp, state_path()) < 0) { int e = errno; unlink(temp); return -e; }
     char directory[PATH_MAX];
-    if (strlen(state_path()) >= sizeof(directory)) return -ENAMETOOLONG;
+    if (strlen(state_path()) >= sizeof(directory)) {
+        fprintf(stderr, "bfband: warning: state directory path is too long after rename\n");
+        return SAVE_DURABILITY_WARNING;
+    }
     strcpy(directory, state_path());
     char *slash = strrchr(directory, '/');
     if (slash && slash != directory) *slash = '\0';
     else strcpy(directory, ".");
     int directory_fd = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (directory_fd < 0) return -errno;
+    if (directory_fd < 0) {
+        fprintf(stderr, "bfband: warning: could not open state directory after rename: %s\n",
+                strerror(errno));
+        return SAVE_DURABILITY_WARNING;
+    }
     int sync_result = fsync(directory_fd);
     int sync_error = errno;
     close(directory_fd);
@@ -378,8 +385,10 @@ static int add(const char *ip, time_t expiry, struct entry *entries, size_t *cou
         int save_result = save(entries, *count);
         if (save_result < 0) {
             entries[i].expires = previous;
-            if (save(entries, *count) < 0)
+            if (save(entries, *count) < 0) {
+                mark_reconciliation_needed(ip);
                 fprintf(stderr, "bfband: could not restore previous state for %s\n", ip);
+            }
         }
         return save_result;
     }
@@ -451,8 +460,10 @@ static int remove_ip(const char *ip, struct entry *entries, size_t *count,
 #else
         if (run_bfban("add", ip) < 0) mark_reconciliation_needed(ip);
 #endif
-        if (save(entries, *count) < 0)
+        if (save(entries, *count) < 0) {
+            mark_reconciliation_needed(ip);
             fprintf(stderr, "bfband: could not restore previous state for %s\n", ip);
+        }
     }
     return r;
 }
@@ -496,7 +507,6 @@ static int add_many(const char *const *addresses, size_t item_count,
     }
     time_t expiry = 0;
     size_t previous_count = *count;
-    size_t inserted = 0;
     for (size_t i = 0; i < new_count; ++i) {
         strcpy(entries[*count].ip, new_addresses[i]);
         entries[*count].expires = expiry;
@@ -508,20 +518,22 @@ static int add_many(const char *const *addresses, size_t item_count,
                 if (direct_update_many(new_addresses, new_count, false) < 0)
                     mark_reconciliation_needed("batch index rollback");
             } else {
-                for (size_t n = 0; n < inserted; ++n)
+                for (size_t n = 0; n < new_count; ++n)
                     if (run_bfban("remove", new_addresses[n]) < 0)
                         mark_reconciliation_needed(new_addresses[n]);
             }
 #else
-            for (size_t n = 0; n < inserted; ++n)
+            for (size_t n = 0; n < new_count; ++n)
                 if (run_bfban("remove", new_addresses[n]) < 0)
                     mark_reconciliation_needed(new_addresses[n]);
 #endif
-            if (save(entries, *count) < 0)
+            if (save(entries, *count) < 0) {
+                mark_reconciliation_needed("batch state restore");
                 fprintf(stderr, "bfband: could not restore previous batch state\n");
+            }
             free(new_addresses); return -ENOSPC;
         }
-        ++*count; ++inserted;
+        ++*count;
     }
     r = save(entries, *count);
     if (r < 0) {
@@ -541,8 +553,10 @@ static int add_many(const char *const *addresses, size_t item_count,
             if (run_bfban("remove", new_addresses[i]) < 0)
                 mark_reconciliation_needed(new_addresses[i]);
 #endif
-        if (save(entries, *count) < 0)
+        if (save(entries, *count) < 0) {
+            mark_reconciliation_needed("batch state restore");
             fprintf(stderr, "bfband: could not restore previous batch state\n");
+        }
     }
     free(new_addresses);
     return r;

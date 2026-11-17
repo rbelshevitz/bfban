@@ -34,6 +34,11 @@ applies them to the bpfilter chain.
   until an explicit `INIT` reconciliation succeeds.
 - [x] Failed persistence of expired-entry cleanup prevents an unsafe daemon
   startup.
+- [x] Post-`rename()` directory-open and `fsync` failures are reported as
+  durability warnings, not treated as pre-commit save failures.
+- [x] CLI fallback batch rollback removes every address submitted to the kernel,
+  including entries after the first failed command.
+- [x] Failed restoration of the previous state marks reconciliation as needed.
 - [x] Direct `libbpfilter` update path when the development package is present.
 - [x] CLI fallback through `bfban` and `bfcli` when direct mode is unavailable.
 - [x] Direct batch updates grouped by address family and exact/CIDR set.
