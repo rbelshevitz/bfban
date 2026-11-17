@@ -104,6 +104,17 @@ make clean all
 sudo make install
 ```
 
+For a non-default prefix, verify that generated runtime paths follow it:
+
+```sh
+./configure --prefix=/opt/bfban
+make
+make DESTDIR=/tmp/bfban-root install
+grep -E 'ExecStart|BFBAN_BIN|BFBAN_BPFCLI' \
+  /tmp/bfban-root/etc/systemd/system/bfband.service \
+  /tmp/bfban-root/etc/bfban/bfban.env
+```
+
 The configure output must say `libbpfilter: enabled` for the primary Rocky
 10/Debian 13/Ubuntu 24.04 test. Use `BFBAN_DIRECT=yes` to fail rather than
 silently fall back when direct integration is required.
@@ -229,6 +240,19 @@ Therefore `bfobserve` is not the high-PPS benchmark path; TPACKET_V3 is the
 next optimization, with AF_XDP reserved for a specialized collector. See
 [Packet MMAP](https://docs.kernel.org/networking/packet_mmap.html) and
 [AF_XDP](https://docs.kernel.org/networking/af_xdp.html).
+
+For the current observer, explicitly verify direction filtering before using
+its suggestions during an incident:
+
+```sh
+sudo bfobserve --interface eno1 --seconds 10 --direction ingress --top 20
+sudo bfobserve --interface eno1 --seconds 10 --direction egress --top 20
+sudo bfobserve --interface eno1 --seconds 10 --direction both --json
+```
+
+The first command is the anti-DDoS view. The second is useful for detecting a
+compromised host or an unexpected local generator; it must not be mixed into
+an ingress source ranking.
 
 ## 9. Acceptance criteria
 

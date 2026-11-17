@@ -4,37 +4,49 @@ CFLAGS ?= -O2 -g -std=c17 -Wall -Wextra -Wpedantic
 -include config.mk
 
 PREFIX ?= /usr/local
+BUILD_DIR ?= build
 BFBAN_DIRECT_CFLAGS ?=
 BFBAN_DIRECT_LIBS ?=
 
 .PHONY: all clean install
 
-all: bfban bfband bfbandctl bfobserve
+all: $(BUILD_DIR)/bfban $(BUILD_DIR)/bfband $(BUILD_DIR)/bfbandctl $(BUILD_DIR)/bfobserve
 
-bfban: src/bfban.c
+$(BUILD_DIR):
+	install -d $@
+
+$(BUILD_DIR)/bfban: src/bfban.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -o $@ $<
 
-bfband: src/bfband.c
+$(BUILD_DIR)/bfband: src/bfband.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(BFBAN_DIRECT_CFLAGS) -o $@ $< $(BFBAN_DIRECT_LIBS)
 
-bfbandctl: src/bfbandctl.c
+$(BUILD_DIR)/bfbandctl: src/bfbandctl.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -o $@ $<
 
-bfobserve: src/bfobserve.c
+$(BUILD_DIR)/bfobserve: src/bfobserve.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -o $@ $<
 
-install: all
+$(BUILD_DIR)/etc/bfban/bfban.env: etc/bfban/bfban.env.in | $(BUILD_DIR)
+	install -d $(dir $@)
+	sed -e 's|@PREFIX@|$(PREFIX)|g' $< > $@
+
+$(BUILD_DIR)/etc/systemd/bfband.service: etc/systemd/bfband.service.in | $(BUILD_DIR)
+	install -d $(dir $@)
+	sed -e 's|@PREFIX@|$(PREFIX)|g' $< > $@
+
+install: all $(BUILD_DIR)/etc/bfban/bfban.env $(BUILD_DIR)/etc/systemd/bfband.service
 	install -d $(DESTDIR)$(PREFIX)/sbin
-	install -m 0755 bfban $(DESTDIR)$(PREFIX)/sbin/bfban
-	install -m 0755 bfband $(DESTDIR)$(PREFIX)/sbin/bfband
-	install -m 0755 bfbandctl $(DESTDIR)$(PREFIX)/sbin/bfbandctl
-	install -m 0755 bfobserve $(DESTDIR)$(PREFIX)/sbin/bfobserve
+	install -m 0755 $(BUILD_DIR)/bfban $(DESTDIR)$(PREFIX)/sbin/bfban
+	install -m 0755 $(BUILD_DIR)/bfband $(DESTDIR)$(PREFIX)/sbin/bfband
+	install -m 0755 $(BUILD_DIR)/bfbandctl $(DESTDIR)$(PREFIX)/sbin/bfbandctl
+	install -m 0755 $(BUILD_DIR)/bfobserve $(DESTDIR)$(PREFIX)/sbin/bfobserve
 	install -d $(DESTDIR)/etc/fail2ban/action.d
 	install -m 0644 etc/fail2ban/action.d/bfban.conf $(DESTDIR)/etc/fail2ban/action.d/bfban.conf
 	install -d $(DESTDIR)/etc/bfban
-	install -m 0644 etc/bfban/bfban.env $(DESTDIR)/etc/bfban/bfban.env
+	install -m 0644 $(BUILD_DIR)/etc/bfban/bfban.env $(DESTDIR)/etc/bfban/bfban.env
 	install -d $(DESTDIR)/etc/systemd/system
-	install -m 0644 etc/systemd/bfband.service $(DESTDIR)/etc/systemd/system/bfband.service
+	install -m 0644 $(BUILD_DIR)/etc/systemd/bfband.service $(DESTDIR)/etc/systemd/system/bfband.service
 
 clean:
-	rm -f bfban bfband bfbandctl bfobserve
+	rm -rf $(BUILD_DIR)

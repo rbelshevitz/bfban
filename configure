@@ -34,6 +34,10 @@ BFBAN_DIRECT_CFLAGS := $direct_cflags
 BFBAN_DIRECT_LIBS := $direct_libs
 EOF
 
+mkdir -p build/etc/bfban build/etc/systemd
+sed "s|@PREFIX@|$prefix|g" etc/bfban/bfban.env.in > build/etc/bfban/bfban.env
+sed "s|@PREFIX@|$prefix|g" etc/systemd/bfband.service.in > build/etc/systemd/bfband.service
+
 echo "prefix: $prefix"
 echo "compiler: $cc"
 echo "Run 'make' to build."

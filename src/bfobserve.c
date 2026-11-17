@@ -46,6 +46,8 @@ struct observer {
     uint64_t malformed;
 };
 
+enum capture_direction { DIRECTION_INGRESS, DIRECTION_EGRESS, DIRECTION_BOTH };
+
 static void usage(FILE *stream)
 {
     fprintf(stream,
@@ -54,6 +56,7 @@ static void usage(FILE *stream)
             "  -l, --list-interfaces list usable interfaces and exit\n"
             "  -s, --seconds N        observation window (default: 30)\n"
             "  -t, --top N            print top N sources (default: 20)\n"
+            "      --direction MODE   ingress, egress or both (default: ingress)\n"
             "      --json             print machine-readable JSON\n"
             "      --suggest          print bfban commands for high-rate sources\n"
             "      --min-pps N         threshold for --suggest (default: 100)\n"
@@ -161,7 +164,9 @@ static void process_packet(struct observer *observer,
 
     if (ether_type == ETH_P_IP) {
         if (length < offset + sizeof(struct ip)) { ++observer->malformed; return; }
-        const struct ip *header = (const struct ip *)(packet + offset);
+        struct ip header_storage;
+        memcpy(&header_storage, packet + offset, sizeof(header_storage));
+        const struct ip *header = &header_storage;
         size_t header_length = (size_t)header->ip_hl * 4;
         if (header_length < sizeof(struct ip) || length < offset + header_length) {
             ++observer->malformed; return;
@@ -171,23 +176,60 @@ static void process_packet(struct observer *observer,
         const unsigned char *transport = packet + offset + header_length;
         size_t available = length - offset - header_length;
         if (protocol == IPPROTO_TCP && available >= sizeof(struct tcphdr)) {
-            const struct tcphdr *tcp = (const struct tcphdr *)transport;
+            struct tcphdr tcp_storage;
+            memcpy(&tcp_storage, transport, sizeof(tcp_storage));
+            const struct tcphdr *tcp = &tcp_storage;
             dport = ntohs(tcp->th_dport); tcp_flags = tcp->th_flags;
         } else if (protocol == IPPROTO_UDP && available >= sizeof(struct udphdr)) {
-            dport = ntohs(((const struct udphdr *)transport)->uh_dport);
+            struct udphdr udp_storage;
+            memcpy(&udp_storage, transport, sizeof(udp_storage));
+            dport = ntohs(udp_storage.uh_dport);
         }
     } else if (ether_type == ETH_P_IPV6) {
         if (length < offset + sizeof(struct ip6_hdr)) { ++observer->malformed; return; }
-        const struct ip6_hdr *header = (const struct ip6_hdr *)(packet + offset);
+        struct ip6_hdr header_storage;
+        memcpy(&header_storage, packet + offset, sizeof(header_storage));
+        const struct ip6_hdr *header = &header_storage;
         if (!inet_ntop(AF_INET6, &header->ip6_src, address, sizeof(address))) return;
         protocol = header->ip6_nxt;
-        const unsigned char *transport = packet + offset + sizeof(struct ip6_hdr);
-        size_t available = length - offset - sizeof(struct ip6_hdr);
+        size_t transport_offset = offset + sizeof(struct ip6_hdr);
+        size_t available = length - transport_offset;
+        for (unsigned int extensions = 0; extensions < 8; ++extensions) {
+            size_t extension_length;
+            if (protocol == IPPROTO_HOPOPTS || protocol == IPPROTO_ROUTING ||
+                protocol == IPPROTO_DSTOPTS) {
+                if (available < 8) { ++observer->malformed; return; }
+                uint8_t next, units;
+                memcpy(&next, packet + transport_offset, 1);
+                memcpy(&units, packet + transport_offset + 1, 1);
+                extension_length = ((size_t)units + 1) * 8;
+                protocol = next;
+            } else if (protocol == IPPROTO_FRAGMENT) {
+                if (available < 8) { ++observer->malformed; return; }
+                memcpy(&protocol, packet + transport_offset, 1);
+                extension_length = 8;
+            } else if (protocol == IPPROTO_AH) {
+                if (available < 2) { ++observer->malformed; return; }
+                uint8_t next, units;
+                memcpy(&next, packet + transport_offset, 1);
+                memcpy(&units, packet + transport_offset + 1, 1);
+                extension_length = ((size_t)units + 2) * 4;
+                protocol = next;
+            } else break;
+            if (extension_length > available) { ++observer->malformed; return; }
+            transport_offset += extension_length;
+            available -= extension_length;
+        }
+        const unsigned char *transport = packet + transport_offset;
         if (protocol == IPPROTO_TCP && available >= sizeof(struct tcphdr)) {
-            const struct tcphdr *tcp = (const struct tcphdr *)transport;
+            struct tcphdr tcp_storage;
+            memcpy(&tcp_storage, transport, sizeof(tcp_storage));
+            const struct tcphdr *tcp = &tcp_storage;
             dport = ntohs(tcp->th_dport); tcp_flags = tcp->th_flags;
         } else if (protocol == IPPROTO_UDP && available >= sizeof(struct udphdr)) {
-            dport = ntohs(((const struct udphdr *)transport)->uh_dport);
+            struct udphdr udp_storage;
+            memcpy(&udp_storage, transport, sizeof(udp_storage));
+            dport = ntohs(udp_storage.uh_dport);
         }
     } else {
         return;
@@ -269,9 +311,11 @@ int main(int argc, char **argv)
     const char *interface = NULL;
     unsigned int seconds = 30, top = 20, min_pps = 100;
     bool json = false, suggest = false;
+    enum capture_direction direction = DIRECTION_INGRESS;
     static const struct option options[] = {
         {"interface", required_argument, NULL, 'i'}, {"seconds", required_argument, NULL, 's'},
         {"top", required_argument, NULL, 't'}, {"list-interfaces", no_argument, NULL, 'l'},
+        {"direction", required_argument, NULL, 1003},
         {"json", no_argument, NULL, 1000},
         {"suggest", no_argument, NULL, 1001}, {"min-pps", required_argument, NULL, 1002},
         {"help", no_argument, NULL, 'h'}, {NULL, 0, NULL, 0}};
@@ -285,6 +329,12 @@ int main(int argc, char **argv)
         case 1000: json = true; break;
         case 1001: suggest = true; break;
         case 1002: min_pps = (unsigned int)strtoul(optarg, NULL, 10); break;
+        case 1003:
+            if (strcmp(optarg, "ingress") == 0) direction = DIRECTION_INGRESS;
+            else if (strcmp(optarg, "egress") == 0) direction = DIRECTION_EGRESS;
+            else if (strcmp(optarg, "both") == 0) direction = DIRECTION_BOTH;
+            else { fprintf(stderr, "bfobserve: invalid direction: %s\n", optarg); return 2; }
+            break;
         default: usage(option == 'h' ? stdout : stderr); return option == 'h' ? 0 : 2;
         }
     }
@@ -310,8 +360,17 @@ int main(int argc, char **argv)
         struct pollfd pfd = {.fd = socket_fd, .events = POLLIN};
         int ready = poll(&pfd, 1, 1000);
         if (ready <= 0) continue;
-        ssize_t length = recvfrom(socket_fd, packet, sizeof(packet), 0, NULL, NULL);
-        if (length > 0) process_packet(&observer, packet, (size_t)length);
+        struct sockaddr_ll packet_address;
+        socklen_t address_length = sizeof(packet_address);
+        ssize_t length = recvfrom(socket_fd, packet, sizeof(packet), 0,
+                                  (struct sockaddr *)&packet_address, &address_length);
+        if (length > 0) {
+            bool outgoing = packet_address.sll_pkttype == PACKET_OUTGOING;
+            if (direction == DIRECTION_BOTH ||
+                (direction == DIRECTION_EGRESS && outgoing) ||
+                (direction == DIRECTION_INGRESS && !outgoing))
+                process_packet(&observer, packet, (size_t)length);
+        }
     }
     close(socket_fd);
     print_report(&observer, top, seconds, json, suggest, min_pps);

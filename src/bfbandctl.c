@@ -8,6 +8,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 #define DEFAULT_SOCKET "/run/bfban/bfban.sock"
@@ -21,7 +22,7 @@ static const char *socket_path(void)
 int main(int argc, char **argv)
 {
     if (argc < 2 || argc > 4) {
-        fprintf(stderr, "Usage: bfbandctl ping|init|add IP [TTL]|remove IP|list|flush\n");
+        fprintf(stderr, "Usage: bfbandctl ping|init|add IP [TTL]|add-many FILE|remove IP|list|flush\n");
         return 2;
     }
     char request[256];
@@ -29,7 +30,21 @@ int main(int argc, char **argv)
         snprintf(request, sizeof(request), "ADD %s %s", argv[2], argc == 4 ? argv[3] : "0");
     else if (strcmp(argv[1], "remove") == 0 && argc == 3)
         snprintf(request, sizeof(request), "DEL %s", argv[2]);
-    else if ((strcmp(argv[1], "ping") == 0 || strcmp(argv[1], "init") == 0 ||
+    else if (strcmp(argv[1], "add-many") == 0 && argc == 3) {
+        FILE *file = fopen(argv[2], "r");
+        if (!file) { fprintf(stderr, "bfbandctl: %s\n", strerror(errno)); return 1; }
+        size_t used = snprintf(request, sizeof(request), "ADD_MANY");
+        char address[64];
+        while (fscanf(file, "%63s", address) == 1) {
+            if (address[0] == '#') { int c; while ((c = fgetc(file)) != '\n' && c != EOF) {} continue; }
+            int n = snprintf(request + used, sizeof(request) - used, " %s", address);
+            if (n < 0 || (size_t)n >= sizeof(request) - used) {
+                fclose(file); fprintf(stderr, "bfbandctl: input file is too large for one batch\n"); return 1;
+            }
+            used += (size_t)n;
+        }
+        fclose(file);
+    } else if ((strcmp(argv[1], "ping") == 0 || strcmp(argv[1], "init") == 0 ||
               strcmp(argv[1], "list") == 0 || strcmp(argv[1], "flush") == 0) && argc == 2)
         snprintf(request, sizeof(request), "%s", strcmp(argv[1], "ping") == 0 ? "PING" :
                  strcmp(argv[1], "init") == 0 ? "INIT" :

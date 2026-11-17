@@ -80,8 +80,11 @@ bpfilter: DROP at the selected kernel hook
 | Saturated provider link | provides no local remedy | replace provider filtering/scrubbing |
 
 The default hook is `NF_LOCAL_IN`, so the default profile protects services
-delivered to this host. It is not a router-wide DDoS filter. For earlier ingress
-drop on a supported interface, configure XDP explicitly:
+delivered to this host. It is not a router-wide DDoS filter. Here, “early
+ingress” means the receive path of an interface: XDP runs before the regular
+Linux network stack creates and processes the packet as an `skb`, so a DROP can
+happen before Netfilter and conntrack. For earlier ingress drop on a supported
+interface, configure XDP explicitly:
 
 ```sh
 export BFBAN_HOOK='BF_HOOK_XDP{ifindex=2}'
@@ -90,8 +93,10 @@ sudo bfban init
 
 Use the actual interface index from `bfobserve --list-interfaces`, keep a
 management path outside the test interface, and benchmark native and generic
-XDP separately. XDP can reduce host-side work; it cannot increase the capacity
-of an already saturated network link.
+XDP separately. XDP is an ingress hook on the selected interface, not an
+outbound socket filter. It can reduce host-side work; it cannot increase the
+capacity of an already saturated network link. See [bpfilter hook placement](https://bpfilter.io/usage/explanation/hooks.html)
+and the [XDP research paper](https://doi.org/10.1145/3281411.3281443).
 
 ## Why this exists
 
@@ -139,6 +144,8 @@ entries are persisted in the state file and restored by `bfband` after restart.
 and performs one `chain update-set` per group (in chunks if needed). This is
 cheaper than invoking `bfban add` once per feed line. Each group update is
 atomic; a multi-group file is not one global transaction.
+CIDRs are canonicalized before storage (`192.0.2.17/24` becomes
+`192.0.2.0/24`), so equivalent prefixes do not create duplicate entries.
 
 ## Step-by-step deployment
 
@@ -168,6 +175,10 @@ cd ~/bfban
 make
 sudo make install
 ```
+
+`make` uses a separate `build/` directory. The selected prefix is also applied
+to the generated systemd unit and `/etc/bfban/bfban.env`; a non-default prefix
+therefore does not leave `ExecStart` pointing at `/usr/local`.
 
 The installation expects `bfcli` at `/usr/local/sbin/bfcli`. Set
 `BFBAN_BPFCLI` in `/etc/bfban/bfban.env` if it is elsewhere.
@@ -271,7 +282,9 @@ sudo bfobserve --interface eno1 --seconds 30 --suggest --min-pps 1000
 
 `bfobserve` is read-only, uses AF_PACKET, requires root or `CAP_NET_RAW`, and
 reports source IP, packets, bytes, PPS, SYN/RST, UDP, and last destination
-port. `--suggest` only prints `bfban add` commands. Check allowlists, ports,
+port. It defaults to ingress accounting and ignores `PACKET_OUTGOING`; use
+`--direction egress` or `--direction both` when auditing host-generated
+traffic. `--suggest` only prints `bfban add` commands. Check allowlists, ports,
 protocols, NAT/CDN effects, and an independent feed before applying a ban.
 
 If native XDP drops a packet before the normal stack, it may not appear in

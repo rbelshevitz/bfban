@@ -1,0 +1,20 @@
+[Unit]
+Description=bfban bpfilter ban-list daemon
+After=network-pre.target
+Before=fail2ban.service
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/bfban/bfban.env
+ExecStart=@PREFIX@/sbin/bfband
+Restart=on-failure
+RuntimeDirectory=bfban
+RuntimeDirectoryMode=0770
+StateDirectory=bfban
+StateDirectoryMode=0750
+UMask=0007
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

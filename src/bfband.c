@@ -30,8 +30,9 @@
 #define BFBAN_PATH "/usr/local/sbin/bfban"
 #define MAX_BANS 65536
 #define MAX_KEY 64
-#define BUFSIZE 512
+#define BUFSIZE 65536
 #define INDEX_SLOTS 131072
+#define MAX_REQUEST_ITEMS 2048
 
 struct entry { char ip[MAX_KEY]; time_t expires; };
 struct index_slot { uint64_t hash; size_t entry; bool used; };
@@ -91,9 +92,53 @@ static int direct_update(const char *ip, bool add)
     bf_set_free(&to_remove);
     return r;
 }
+
+static int direct_update_many(const char *const *addresses, size_t count, bool add)
+{
+    const char *sets[] = {"banlist4", "banlist4net", "banlist6", "banlist6net"};
+    enum bf_matcher_type keys[] = {BF_MATCHER_IP4_SADDR, BF_MATCHER_IP4_SNET,
+                                   BF_MATCHER_IP6_SADDR, BF_MATCHER_IP6_SNET};
+    for (size_t group = 0; group < 4; ++group) {
+        struct bf_set *to_add = NULL, *to_remove = NULL;
+        int r = bf_set_new(&to_add, sets[group], &keys[group], 1);
+        if (r < 0) return r;
+        r = bf_set_new(&to_remove, sets[group], &keys[group], 1);
+        if (r < 0) { bf_set_free(&to_add); return r; }
+        struct bf_set *delta = add ? to_add : to_remove;
+        for (size_t i = 0; i < count; ++i) {
+            bool prefix = strchr(addresses[i], '/') != NULL;
+            bool ipv6 = strchr(addresses[i], ':') != NULL;
+            if ((group == 0 && (prefix || ipv6)) || (group == 1 && (!prefix || ipv6)) ||
+                (group == 2 && (prefix || !ipv6)) || (group == 3 && (!prefix || !ipv6)))
+                continue;
+            r = bf_set_add_elem_raw(delta, addresses[i]);
+            if (r < 0) break;
+        }
+        if (r >= 0) r = bf_chain_update_set(env_or("BFBAN_CHAIN", "bfban_input"),
+                                             to_add, to_remove);
+        bf_set_free(&to_add);
+        bf_set_free(&to_remove);
+        if (r < 0) return r;
+    }
+    return 0;
+}
 #endif
 
 static void signal_handler(int sig) { (void)sig; stopping = 1; }
+
+static ssize_t read_request(int fd, char *buffer, size_t size)
+{
+    size_t used = 0;
+    while (used + 1 < size) {
+        ssize_t n = read(fd, buffer + used, size - used - 1);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        used += (size_t)n;
+        if (memchr(buffer, '\n', used)) break;
+    }
+    buffer[used] = '\0';
+    return used ? (ssize_t)used : -1;
+}
 
 static bool valid_ip(const char *ip)
 {
@@ -111,6 +156,44 @@ static bool valid_ip(const char *ip)
     if (inet_pton(AF_INET, copy, &v4) == 1) return prefix >= 0 && prefix <= 32;
     if (inet_pton(AF_INET6, copy, &v6) == 1) return prefix >= 0 && prefix <= 128;
     return false;
+}
+
+static int normalize_address(const char *input, char *output, size_t size)
+{
+    char copy[MAX_KEY], *slash;
+    struct in_addr v4;
+    struct in6_addr v6;
+    if (!input || strlen(input) >= sizeof(copy)) return -EINVAL;
+    strcpy(copy, input);
+    slash = strchr(copy, '/');
+    int family = AF_UNSPEC, prefix = -1;
+    if (slash) {
+        char *end = NULL;
+        *slash++ = '\0';
+        long value = strtol(slash, &end, 10);
+        if (*slash == '\0' || *end != '\0' || value < 0 || value > 128) return -EINVAL;
+        prefix = (int)value;
+    }
+    if (inet_pton(AF_INET, copy, &v4) == 1) {
+        family = AF_INET;
+        if (slash && prefix > 32) return -EINVAL;
+        if (slash) {
+            uint32_t mask = prefix == 0 ? 0 : htonl(~0U << (32 - prefix));
+            v4.s_addr &= mask;
+        }
+    } else if (inet_pton(AF_INET6, copy, &v6) == 1) {
+        family = AF_INET6;
+        if (slash) {
+            for (int bit = prefix; bit < 128; ++bit)
+                v6.s6_addr[bit / 8] &= (unsigned char)~(1U << (7 - bit % 8));
+        }
+    } else return -EINVAL;
+    char address[INET6_ADDRSTRLEN];
+    if (!inet_ntop(family, family == AF_INET ? (void *)&v4 : (void *)&v6,
+                   address, sizeof(address))) return -errno;
+    int n = slash ? snprintf(output, size, "%s/%d", address, prefix)
+                  : snprintf(output, size, "%s", address);
+    return n < 0 || (size_t)n >= size ? -ENAMETOOLONG : 0;
 }
 
 static int parent_dir(const char *path)
@@ -207,6 +290,9 @@ static int load(struct entry *entries, size_t *count, struct index_slot *index)
         long long expiry = 0;
         char ip[MAX_KEY];
         if (sscanf(line, "%63s %lld", ip, &expiry) < 1 || !valid_ip(ip)) continue;
+        char normalized[MAX_KEY];
+        if (normalize_address(ip, normalized, sizeof(normalized)) < 0) continue;
+        strcpy(ip, normalized);
         if (*count == MAX_BANS) { fclose(f); return -ENOSPC; }
         if (find(entries, index, ip) >= 0) continue;
         strcpy(entries[*count].ip, ip);
@@ -272,6 +358,34 @@ static int remove_ip(const char *ip, struct entry *entries, size_t *count,
     return save(entries, *count);
 }
 
+static int add_many(const char *const *addresses, size_t item_count,
+                    struct entry *entries, size_t *count,
+                    struct index_slot *index)
+{
+    if (!item_count) return 0;
+    int r = 0;
+#ifdef BFBAN_WITH_LIBBPFILTER
+    if (direct_enabled) r = direct_update_many(addresses, item_count, true);
+    else
+#endif
+    {
+        for (size_t i = 0; i < item_count && r >= 0; ++i)
+            r = run_bfban("add", addresses[i]);
+    }
+    if (r < 0) return r;
+    time_t expiry = 0;
+    for (size_t i = 0; i < item_count; ++i) {
+        ssize_t existing = find(entries, index, addresses[i]);
+        if (existing >= 0) continue;
+        if (*count == MAX_BANS) return -ENOSPC;
+        strcpy(entries[*count].ip, addresses[i]);
+        entries[*count].expires = expiry;
+        if (index_insert(entries, *count, index) < 0) return -ENOSPC;
+        ++*count;
+    }
+    return save(entries, *count);
+}
+
 static int request(const char *line, struct entry *entries, size_t *count,
                    struct index_slot *index, char *response, size_t size)
 {
@@ -293,49 +407,88 @@ static int request(const char *line, struct entry *entries, size_t *count,
         }
         return 1;
     }
+    if (strcmp(cmd, "ADD_MANY") == 0) {
+        char copy[BUFSIZE];
+        snprintf(copy, sizeof(copy), "%s", line);
+        char *saveptr = NULL;
+        char *token = strtok_r(copy, " \t\r\n", &saveptr);
+        const char **addresses = calloc(MAX_REQUEST_ITEMS, sizeof(*addresses));
+        char (*normalized)[MAX_KEY] = calloc(MAX_REQUEST_ITEMS, sizeof(*normalized));
+        if (!addresses || !normalized) { free(addresses); free(normalized); return -ENOMEM; }
+        size_t item_count = 0;
+        while ((token = strtok_r(NULL, " \t\r\n", &saveptr)) != NULL) {
+            if (item_count == MAX_REQUEST_ITEMS) {
+                free(addresses); free(normalized); return -E2BIG;
+            }
+            if (normalize_address(token, normalized[item_count], MAX_KEY) < 0) {
+                free(addresses); free(normalized); return -EINVAL;
+            }
+            bool duplicate = false;
+            for (size_t i = 0; i < item_count; ++i)
+                if (strcmp(addresses[i], normalized[item_count]) == 0) duplicate = true;
+            if (!duplicate) {
+                addresses[item_count] = normalized[item_count];
+                ++item_count;
+            }
+        }
+        int result = add_many(addresses, item_count, entries, count, index);
+        free(addresses); free(normalized);
+        return result;
+    }
     if (strcmp(cmd, "ADD") == 0 && sscanf(line, "%15s %63s %lld", cmd, ip, &ttl) >= 2) {
         if (!valid_ip(ip) || ttl < 0) return -EINVAL;
-        return add(ip, ttl ? time(NULL) + (time_t)ttl : 0, entries, count, index);
+        char normalized[MAX_KEY];
+        int normalize_result = normalize_address(ip, normalized, sizeof(normalized));
+        if (normalize_result < 0) return normalize_result;
+        return add(normalized, ttl ? time(NULL) + (time_t)ttl : 0, entries, count, index);
     }
     if (strcmp(cmd, "DEL") == 0 && sscanf(line, "%15s %63s", cmd, ip) == 2) {
         if (!valid_ip(ip)) return -EINVAL;
-        return remove_ip(ip, entries, count, index);
+        char normalized[MAX_KEY];
+        int normalize_result = normalize_address(ip, normalized, sizeof(normalized));
+        if (normalize_result < 0) return normalize_result;
+        return remove_ip(normalized, entries, count, index);
     }
     return -EINVAL;
 }
 
 int main(void)
 {
-    struct entry entries[MAX_BANS];
-    struct index_slot index[INDEX_SLOTS];
+    struct entry *entries = calloc(MAX_BANS, sizeof(*entries));
+    struct index_slot *index = calloc(INDEX_SLOTS, sizeof(*index));
+    if (!entries || !index) { free(entries); free(index); return 1; }
     size_t count;
     int r = load(entries, &count, index);
-    if (r < 0) return 1;
+    if (r < 0) { free(entries); free(index); return 1; }
     r = run_bfban("init", NULL);
-    if (r < 0) return 1;
+    if (r < 0) { free(entries); free(index); return 1; }
 #ifdef BFBAN_WITH_LIBBPFILTER
     r = direct_setup();
-    if (r < 0) return 1;
+    if (r < 0) { free(entries); free(index); return 1; }
 #endif
+    bool changed = false;
     for (size_t i = 0; i < count; ++i) {
         if (entries[i].expires && entries[i].expires <= time(NULL)) {
             entries[i] = entries[count - 1];
             --count;
             --i;
+            changed = true;
             continue;
         }
         r = run_bfban("add", entries[i].ip);
-        if (r < 0) return 1;
+        if (r < 0) { free(entries); free(index); return 1; }
     }
-    if (parent_dir(sock_path()) < 0) return 1;
+    if (changed) { rebuild_index(entries, count, index); (void)save(entries, count); }
+    if (parent_dir(sock_path()) < 0) { free(entries); free(index); return 1; }
     int server = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (server < 0) return 1;
+    if (server < 0) { free(entries); free(index); return 1; }
     unlink(sock_path());
     struct sockaddr_un addr = {.sun_family = AF_UNIX};
-    if (strlen(sock_path()) >= sizeof(addr.sun_path)) return 1;
+    if (strlen(sock_path()) >= sizeof(addr.sun_path)) { close(server); free(entries); free(index); return 1; }
     strcpy(addr.sun_path, sock_path());
-    if (bind(server, (struct sockaddr *)&addr, sizeof(addr)) < 0 || listen(server, 32) < 0)
-        return 1;
+    if (bind(server, (struct sockaddr *)&addr, sizeof(addr)) < 0 || listen(server, 32) < 0) {
+        close(server); free(entries); free(index); return 1;
+    }
     chmod(sock_path(), 0660);
     signal(SIGTERM, signal_handler); signal(SIGINT, signal_handler);
     while (!stopping) {
@@ -350,7 +503,7 @@ int main(void)
         int client = accept(server, NULL, NULL);
         if (client < 0) continue;
         char line[BUFSIZE] = {0}, response[BUFSIZE] = {0};
-        ssize_t n = read(client, line, sizeof(line) - 1);
+        ssize_t n = read_request(client, line, sizeof(line));
         int result = n > 0 ? request(line, entries, &count, index, response, sizeof(response)) : -EINVAL;
         if (result == 1 && !response[0]) strcpy(response, "OK\n");
         if (result < 0) snprintf(response, sizeof(response), "ERR %s\n", strerror(-result));
@@ -361,5 +514,7 @@ int main(void)
 #ifdef BFBAN_WITH_LIBBPFILTER
     if (direct_enabled) bf_ctx_teardown();
 #endif
+    free(entries);
+    free(index);
     return 0;
 }
