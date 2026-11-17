@@ -511,6 +511,7 @@ int main(void)
         close(server); free(entries); free(index); return 1;
     }
     chmod(sock_path(), 0660);
+    signal(SIGPIPE, SIG_IGN);
     signal(SIGTERM, signal_handler); signal(SIGINT, signal_handler);
     while (!stopping) {
         time_t now = time(NULL);

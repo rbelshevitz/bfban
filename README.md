@@ -45,7 +45,7 @@ through the direct C API. If it is unavailable, it falls back to the installed
 | systemd state recovery and TTL handling | implemented |
 | `bfobserve` interface listing, top-N, JSON, and operator suggestions | implemented using AF_PACKET |
 | Open-addressing daemon index for fast ADD/DEL/TTL lookup | implemented |
-| Per-source eBPF/XDP telemetry, automatic detection, and per-jail namespaces | roadmap |
+| Per-source eBPF/XDP telemetry, automatic detection, and per-jail namespaces | out of scope for v1 |
 
 The practical “wow” features are deliberately operational rather than
 marketing claims: a CIDR prefix is stored as one LPM entry, Fail2ban talks to
@@ -53,6 +53,20 @@ one daemon socket, `bfobserve` shows where traffic is coming from before an
 operator bans it, and state recovery lets the dynamic list survive a daemon
 restart. Automatic detection and upstream DDoS mitigation are outside the
 current scope.
+
+The finite delivery checklist is [`docs/roadmap.md`](docs/roadmap.md).
+
+## Scope of use
+
+Use `bfban` when a Linux edge host needs a dynamic exact-IP or CIDR deny list
+fed by Fail2ban, CrowdSec, an operator, or a threat-intelligence feed. The
+daemon centralizes updates, keeps state and TTLs, and applies the decision to
+bpfilter without replacing the host's main firewall.
+
+Do not use it as a log detector, a complete stateful firewall, a NAT/conntrack
+replacement, an automatic botnet classifier, or a cure for an already
+saturated uplink. Those cases require the existing firewall, application
+controls, upstream ACLs, or DDoS scrubbing.
 
 ## Anti-DDoS role
 
@@ -160,14 +174,54 @@ mountpoint /sys/fs/bpf
 sudo bfobserve --list-interfaces
 ```
 
-The current target is Linux 6.6+, libbpf 1.2+, and a bpfilter build whose
-selected hooks work on that kernel. Ubuntu 24.04 (6.8), Debian 13 (6.12),
+The current validation target is Linux 6.6+, libbpf 1.2+, and a bpfilter build
+whose selected hooks work on that kernel. This is a tested target baseline,
+not a universal minimum asserted by `bfban` alone. Ubuntu 24.04 (6.8), Debian
+13 (6.12),
 Fedora 40 (6.8), RHEL/Rocky/Alma 10 (6.12), and Ubuntu 22.04 with HWE 6.8
 are examples of matching base kernels. RHEL/Rocky/Alma 9 (5.14) and Debian
 12 (6.1) need a newer supported kernel or backport. Verify compatibility
 before production use.
 
 ### 2. Build and install
+
+Dependency split:
+
+| Use case | Required components |
+|---|---|
+| `bfban` fallback build | C compiler, libc development headers, `make` |
+| Direct `bfband` build | `bpfilter`, `bpfilter-devel`, `pkg-config` |
+| bpfilter source build | CMake, GCC, Clang, `libbpf-devel`, Bison, Flex, `sed`, `xxd` |
+| Runtime enforcement | `bfcli`/`bpfilter`, mounted BPF filesystem, root privileges |
+| Fail2ban integration | `fail2ban` and systemd, if using the supplied action |
+| Validation/diagnostics | `bpftool`, `iproute`, `ethtool`, `perf`, `sar`/`sysstat` |
+
+On Fedora or an EPEL-enabled RHEL-family host, use the packaged bpfilter when
+available:
+
+```sh
+sudo dnf install -y epel-release
+sudo dnf install -y bpfilter bpfilter-devel
+command -v bfcli
+pkg-config --modversion bpfilter
+pkg-config --cflags --libs bpfilter
+```
+
+`bpfilter` provides `bfcli` and the runtime library; `bpfilter-devel` provides
+the headers and development metadata required for the direct `bfband` build.
+If the package is unavailable for the selected distribution, build and install
+bpfilter from its [official source-build instructions](https://bpfilter.io/developers/build.html).
+
+The short source-build form is:
+
+```sh
+cmake -S /path/to/bpfilter -B /tmp/bpfilter-build \
+  -DNO_DOCS=ON -DNO_TESTS=ON -DNO_CHECKS=ON \
+  -DCMAKE_INSTALL_PREFIX=/usr/local
+cmake --build /tmp/bpfilter-build -j"$(nproc)"
+sudo cmake --install /tmp/bpfilter-build
+sudo ldconfig
+```
 
 ```sh
 cd ~/bfban
@@ -180,13 +234,21 @@ sudo make install
 to the generated systemd unit and `/etc/bfban/bfban.env`; a non-default prefix
 therefore does not leave `ExecStart` pointing at `/usr/local`.
 
-The installation expects `bfcli` at `/usr/local/sbin/bfcli`. Set
-`BFBAN_BPFCLI` in `/etc/bfban/bfban.env` if it is elsewhere.
+The generated environment file points `BFBAN_BPFCLI` at the selected install
+prefix. Override `BFBAN_BPFCLI` in `/etc/bfban/bfban.env` if `bfcli` is
+installed elsewhere.
 
 Run `./configure` after installing bpfilter so it can discover the
 `libbpfilter` pkg-config file. Direct mode removes the per-ban `fork()`/`exec()`
 and CLI parsing path. It does not by itself prove a packet-processing
 throughput improvement.
+
+If bpfilter was built from source but not installed into its configured
+prefix, set `PKG_CONFIG_PATH` to the directory containing `bpfilter.pc` and
+make sure that file's `prefix`, `includedir`, and `libdir` point to the same
+installation tree. A build-directory `.pc` file that still says
+`prefix=/usr/local` may be detected successfully but then make compilation
+fail.
 
 The bpfilter engine and C library are documented in the official
 [`libbpfilter` documentation](https://bpfilter.io/developers/modules/libbpfilter/libbpfilter.html).
@@ -248,6 +310,10 @@ ADD_MANY 203.0.113.10 198.51.100.0/24
 `bfbandctl add-many FILE` uses this path. In direct mode, exact and CIDR
 entries are grouped by bpfilter set before the kernel update; the fallback
 remains compatible with the CLI backend.
+
+The Fail2ban `actioncheck` command checks that the daemon socket is alive. It
+is not a packet-path benchmark and does not claim that every upstream hook is
+healthy; `bfbandctl init`/daemon reconciliation is the recovery operation.
 
 Create `/etc/fail2ban/jail.d/sshd-bfban.local`:
 
@@ -419,8 +485,9 @@ sudo bpftool map show
 sudo bpftool map dump id MAP_ID
 ```
 
-The MVP still needs per-jail namespaces, measured benchmarks, stronger systemd
-hardening, and eBPF per-source telemetry.
+Version 1 deliberately stops here. Per-jail namespaces, per-source
+eBPF/XDP telemetry, and automatic detection are separate future products, not
+requirements for the daemon and Fail2ban integration described above.
 
 ## License
 

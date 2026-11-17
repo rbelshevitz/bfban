@@ -8,6 +8,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <signal.h>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -22,6 +23,7 @@ static const char *socket_path(void)
 
 int main(int argc, char **argv)
 {
+    signal(SIGPIPE, SIG_IGN);
     if (argc < 2 || argc > 4) {
         fprintf(stderr, "Usage: bfbandctl ping|init|add IP [TTL]|add-many FILE|remove IP|list|flush\n");
         return 2;

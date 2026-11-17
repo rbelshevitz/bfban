@@ -51,13 +51,21 @@ the current kernel target.
 
 ## 3. Install test dependencies
 
+The `bfban` fallback build itself has no external library dependency. The
+direct profile additionally needs the installed `bpfilter` runtime and
+development package; the bpfilter source build has its own compiler/toolchain
+requirements. The packages below are for the complete validation lab, not all
+of them are required on a production host.
+
 ### Rocky Linux 10
 
 ```sh
 sudo dnf upgrade -y
 sudo dnf install -y git gcc gcc-c++ make cmake ninja-build \
   pkgconf-pkg-config clang llvm libbpf libbpf-devel bpftool \
-  kernel-devel kernel-headers iproute ethtool perf
+  kernel-devel kernel-headers iproute ethtool perf sysstat fail2ban
+sudo dnf install -y epel-release
+sudo dnf install -y bpfilter bpfilter-devel
 ```
 
 ### Debian 13
@@ -66,7 +74,7 @@ sudo dnf install -y git gcc gcc-c++ make cmake ninja-build \
 sudo apt update
 sudo apt install -y git build-essential cmake ninja-build pkg-config \
   clang llvm libbpf-dev bpftool linux-headers-amd64 \
-  iproute2 ethtool linux-perf
+  iproute2 ethtool linux-perf sysstat fail2ban
 ```
 
 ### Ubuntu 24.04
@@ -76,7 +84,7 @@ sudo apt update
 sudo apt install -y git build-essential cmake ninja-build pkg-config \
   clang llvm libbpf-dev bpftool linux-headers-$(uname -r) \
   iproute2 ethtool linux-tools-common linux-tools-$(uname -r) \
-  linux-perf
+  linux-perf sysstat fail2ban
 ```
 
 Package names can differ in cloud/minimal images. Record the image and
@@ -86,6 +94,17 @@ repository state instead of silently substituting a different kernel/toolchain.
 
 Build and install bpfilter according to its upstream instructions. The
 validation requirement is that both the CLI and library are visible:
+
+For a source build, the minimal reproducible form is:
+
+```sh
+cmake -S /path/to/bpfilter -B /tmp/bpfilter-build \
+  -DNO_DOCS=ON -DNO_TESTS=ON -DNO_CHECKS=ON \
+  -DCMAKE_INSTALL_PREFIX=/usr/local
+cmake --build /tmp/bpfilter-build -j"$(nproc)"
+sudo cmake --install /tmp/bpfilter-build
+sudo ldconfig
+```
 
 ```sh
 command -v bfcli
@@ -118,6 +137,11 @@ grep -E 'ExecStart|BFBAN_BIN|BFBAN_BPFCLI' \
 The configure output must say `libbpfilter: enabled` for the primary Rocky
 10/Debian 13/Ubuntu 24.04 test. Use `BFBAN_DIRECT=yes` to fail rather than
 silently fall back when direct integration is required.
+
+When bpfilter is only staged in a build directory, inspect
+`pkg-config --variable=prefix bpfilter` and ensure the `.pc` file points to the
+headers and library that it advertises. Otherwise `configure` can report
+`libbpfilter: enabled` while the compiler still searches `/usr/local/include`.
 
 ## 5. Check kernel and BPF capabilities
 
