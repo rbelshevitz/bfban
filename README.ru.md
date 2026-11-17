@@ -4,12 +4,14 @@
 
 ## Что это
 
-`bfban` — небольшой Linux-компонент для управления динамическим списком
-заблокированных IP-адресов через `bpfilter` и eBPF.
+`bfban` — Linux-бэкенд для применения динамических списков заблокированных
+IP-адресов. Он использует sets `bpfilter`/eBPF и интегрируется с Fail2ban,
+CrowdSec и другими security-agent’ами.
 
 `bfban` не анализирует логи и не принимает решение о том, кто является
 атакующим. За это отвечают Fail2ban, CrowdSec или собственный security-agent.
-`bfban` является быстрым слоем исполнения уже принятого решения:
+`bfban` не анализирует логи и не принимает решение о вредоносности адреса; он
+применяет уже принятое решение:
 
 ```text
 Fail2ban / CrowdSec / свой агент
@@ -24,16 +26,23 @@ Fail2ban / CrowdSec / свой агент
           eBPF DROP на Linux
 ```
 
-В текущем MVP `bfban` управляет одной bpfilter-chain через установленный
-`bfcli`. Дополнительный демон `bfband` держит Unix-сокет, TTL и состояние
-банов. Если `libbpfilter` найден через `pkg-config`, daemon обновляет sets
-через прямой C API; иначе используется fallback через `bfban`/`bfcli`.
+В текущем MVP `bfban` управляет одной bpfilter-chain. Демон `bfband` держит
+Unix-сокет, TTL и состояние банов. Если `libbpfilter` найден через `pkg-config`,
+daemon использует прямой C API; иначе работает fallback через `bfban`/`bfcli`.
+
+Проект распространяется под GPL-2.0-only.
 
 Исходный движок находится в [libbpfilter](https://bpfilter.io/developers/modules/libbpfilter/libbpfilter.html),
 а локальные публичные заголовки — в
 [`src/libbpfilter/include/bpfilter`](https://github.com/facebook/bpfilter/tree/main/src/libbpfilter/include/bpfilter).
 Режим выбирается через `BFBAN_DIRECT=auto|yes|no`, а путь к bpffs — через
 `BFBAN_BPFFS`.
+
+Практические «вау-фичи» здесь — не рекламные обещания: CIDR хранится одной
+LPM-записью, Fail2ban работает через один Unix-сокет daemon, `bfobserve`
+показывает источники нагрузки до принятия решения о блокировке, а state
+восстанавливается после рестарта. Автоматическое обнаружение атак и upstream
+DDoS mitigation намеренно не входят в текущий scope.
 
 ## CIDR — полноценная поддержка сетей
 
@@ -369,14 +378,23 @@ packages](https://packages.fedoraproject.org/pkgs/kernel/kernel/index.html),
 
 Научное и инженерное обоснование не в том, что любой eBPF-код быстрее
 iptables. Выигрыш возникает в конкретной точке обработки и при конкретном
-профиле нагрузки:
+профиле нагрузки. Академическая база — статья:
+
+> Toke Høiland-Jørgensen, Jesper Dangaard Brouer, Daniel Borkmann, John
+> Fastabend, Tom Herbert, David Ahern и David Miller. «The eXpress Data Path:
+> Fast Programmable Packet Processing in the Operating System Kernel». ACM
+> CoNEXT 2018. DOI: [10.1145/3281411.3281443](https://doi.org/10.1145/3281411.3281443).
 
 1. XDP вызывается на раннем пути приёма пакета и может вернуть `XDP_DROP` до
    обычной обработки сетевым стеком.
-2. bpfilter компилирует набор условий в одну проверяемую kernel-программу,
-   а большие blocklist хранит в BPF maps/sets.
-3. Динамический ban меняет данные map/set, а не добавляет новую firewall-rule
-   в линейную цепочку.
+2. Linux может JIT-компилировать eBPF в машинный код, но результат зависит от
+   архитектуры и конфигурации ядра.
+3. Точные адреса хранятся в hash-style sets, а CIDR проверяется через
+   longest-prefix match (LPM), без разворачивания сети в отдельные IP.
+4. `chain update-set` в bpfilter атомарен и сохраняет counters, но сам bpfilter
+   указывает, что при этом регенерирует BPF-программу с новым содержимым set.
+   Direct API убирает fork/exec и CLI parsing, но не делает kernel update
+   бесплатным.
 
 Это делает решение перспективным для раннего L3/L4 drop, больших blocklist и
 высокого packet rate. Это не доказывает преимущество над современным
@@ -392,6 +410,7 @@ accept/drop ratio, CPU, latency, IPv4/IPv6 и наличие counters/logging.
 
 Первичные источники описывают раннее выполнение XDP и live-frame режим в
 [Linux kernel BPF documentation](https://docs.kernel.org/bpf/bpf_prog_run.html),
+LPM в [Linux LPM-trie documentation](https://docs.kernel.org/bpf/map_lpm_trie.html),
 а требования и поддержка конкретных hooks должны проверяться по kernel API,
 который использует сам bpfilter.
 

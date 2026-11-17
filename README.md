@@ -2,10 +2,12 @@
 
 [English](README.md) | [Русский](README.ru.md)
 
-`bfban` is a small GPL-2.0-only dynamic ban-list manager for Linux
-`bpfilter`. It is an enforcement backend for Fail2ban, CrowdSec, or another
-security agent. It does not parse logs and does not decide whether an IP is
-malicious.
+`bfban` is a Linux enforcement backend for dynamic IP blocklists. It uses
+`bpfilter`/eBPF sets and exposes an integration path for Fail2ban, CrowdSec,
+and other security agents. It does not parse logs and does not decide whether
+an IP is malicious.
+
+The project is licensed under GPL-2.0-only.
 
 ```text
 Fail2ban / CrowdSec / security agent
@@ -31,6 +33,25 @@ The current MVP provides:
 When `libbpfilter` is available through `pkg-config`, the daemon updates sets
 through the direct C API. If it is unavailable, it falls back to the installed
 `bfban`/`bfcli` tools. Select the behavior with `BFBAN_DIRECT=auto|yes|no`.
+
+## What is implemented
+
+| Feature | Status |
+|---|---|
+| Fail2ban action through a Unix-socket daemon | implemented |
+| Exact IPv4/IPv6 and CIDR blocklists | implemented |
+| Separate exact and prefix/LPM sets | implemented |
+| Direct `libbpfilter` update path with CLI fallback | implemented when `bpfilter.pc` is available |
+| systemd state recovery and TTL handling | implemented |
+| `bfobserve` interface listing, top-N, JSON, and operator suggestions | implemented using AF_PACKET |
+| Per-source eBPF/XDP telemetry, automatic detection, and per-jail namespaces | roadmap |
+
+The practical “wow” features are deliberately operational rather than
+marketing claims: a CIDR prefix is stored as one LPM entry, Fail2ban talks to
+one daemon socket, `bfobserve` shows where traffic is coming from before an
+operator bans it, and state recovery lets the dynamic list survive a daemon
+restart. Automatic detection and upstream DDoS mitigation are outside the
+current scope.
 
 ## Why this exists
 
@@ -108,7 +129,8 @@ The installation expects `bfcli` at `/usr/local/sbin/bfcli`. Set
 
 Run `./configure` after installing bpfilter so it can discover the
 `libbpfilter` pkg-config file. Direct mode removes the per-ban `fork()`/`exec()`
-path; it does not by itself prove a packet-processing throughput improvement.
+and CLI parsing path. It does not by itself prove a packet-processing
+throughput improvement.
 
 The bpfilter engine and C library are documented in the official
 [`libbpfilter` documentation](https://bpfilter.io/developers/modules/libbpfilter/libbpfilter.html).
@@ -237,6 +259,36 @@ sudo journalctl -u bfband -b --no-pager
 Keep console access. A local filter cannot fix a saturated upstream link; use
 provider filtering or scrubbing for volumetric DDoS.
 
+## Kernel-specific technical basis
+
+The design relies on specific kernel mechanisms, not on a general claim that
+all eBPF code is faster:
+
+- XDP is attached at the receive path before the normal Linux network stack;
+  native driver mode can avoid work that would otherwise happen later. Generic
+  XDP/SKB mode has different costs and must be measured separately.
+- Linux can JIT eBPF instructions to native machine code on supported
+  architectures. JIT state and kernel configuration must be recorded in a
+  benchmark; it is not safe to assume identical code generation everywhere.
+- Exact address sets use hash-style storage. Prefix sets use longest-prefix
+  matching (LPM); they represent a CIDR network without expanding it into all
+  member addresses.
+- bpfilter's `chain update-set` is an atomic delta operation that preserves
+  counters, but bpfilter documents that it regenerates the chain's BPF program
+  with the changed set. The direct API removes userspace process/CLI overhead;
+  it is not a promise of zero-cost kernel updates.
+
+The academic basis for the XDP placement and performance trade-offs is:
+
+> Toke Høiland-Jørgensen, Jesper Dangaard Brouer, Daniel Borkmann, John
+> Fastabend, Tom Herbert, David Ahern, and David Miller. “The eXpress Data
+> Path: Fast Programmable Packet Processing in the Operating System Kernel.”
+> ACM CoNEXT 2018. DOI: [10.1145/3281411.3281443](https://doi.org/10.1145/3281411.3281443).
+
+Kernel references are [BPF/JIT](https://docs.kernel.org/networking/filter.html),
+[LPM trie maps](https://docs.kernel.org/bpf/map_lpm_trie.html), and
+[BPF hash maps](https://docs.kernel.org/bpf/map_hash.html).
+
 ## Performance: evidence and benchmark method
 
 The mechanism-level reason to test XDP/eBPF is established by primary docs:
@@ -246,7 +298,7 @@ The mechanism-level reason to test XDP/eBPF is established by primary docs:
 2. Linux documents eBPF JIT compilation to native machine code on supported
    architectures.
 3. BPF hash maps provide key lookup/update operations; LPM-trie maps support
-   prefix matching, with documented preallocation and LRU trade-offs.
+   longest-prefix matching, with documented allocation trade-offs.
 
 This is a benchmark hypothesis, not proof that `bfban` beats nftables. A
 Netfilter bpfilter chain, nftables set, legacy iptables chain, and native XDP
@@ -293,7 +345,7 @@ sudo bpftool map show
 sudo bpftool map dump id MAP_ID
 ```
 
-The MVP still needs per-jail namespaces, atomic CIDR-aware feed batches,
+The MVP still needs per-jail namespaces, batched CIDR-aware feed updates,
 bounded daemon storage, measured benchmarks, stronger systemd hardening, and
 eBPF per-source telemetry.
 
