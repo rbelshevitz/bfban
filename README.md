@@ -314,7 +314,9 @@ remains compatible with the CLI backend.
 The daemon `fsync`s the state file and then attempts to `fsync` its directory.
 Kernel changes and the state file are not one physical transaction,
 so a failed state write triggers a best-effort kernel rollback and startup
-reconciliation is the final recovery path.
+reconciliation can reapply the recorded state. If a compensating rollback fails,
+the daemon reports the condition and requires an explicit successful `INIT`
+before accepting further mutations.
 
 The Fail2ban `actioncheck` command checks that the daemon socket is alive. It
 is not a packet-path benchmark and does not claim that every upstream hook is

@@ -35,10 +35,12 @@
 #define BUFSIZE 65536
 #define INDEX_SLOTS 131072
 #define MAX_REQUEST_ITEMS 2048
+#define SAVE_DURABILITY_WARNING 1
 
 struct entry { char ip[MAX_KEY]; time_t expires; };
 struct index_slot { uint64_t hash; size_t entry; bool used; };
 static volatile sig_atomic_t stopping;
+static bool reconciliation_needed;
 
 #ifdef BFBAN_WITH_LIBBPFILTER
 static bool direct_enabled;
@@ -352,10 +354,18 @@ static int save(const struct entry *entries, size_t count)
     int sync_result = fsync(directory_fd);
     int sync_error = errno;
     close(directory_fd);
-    if (sync_result < 0)
+    if (sync_result < 0) {
         fprintf(stderr, "bfband: warning: could not fsync state directory: %s\n",
                 strerror(sync_error));
+        return SAVE_DURABILITY_WARNING;
+    }
     return 0;
+}
+
+static void mark_reconciliation_needed(const char *reason)
+{
+    reconciliation_needed = true;
+    fprintf(stderr, "bfband: kernel/state reconciliation required: %s\n", reason);
 }
 
 static int add(const char *ip, time_t expiry, struct entry *entries, size_t *count,
@@ -385,7 +395,13 @@ static int add(const char *ip, time_t expiry, struct entry *entries, size_t *cou
     if (index_insert(entries, *count - 1, index) < 0) {
         --*count;
 #ifdef BFBAN_WITH_LIBBPFILTER
-        if (direct_enabled) (void)direct_update(ip, false);
+        if (direct_enabled) {
+            if (direct_update(ip, false) < 0) mark_reconciliation_needed(ip);
+        } else if (run_bfban("remove", ip) < 0) {
+            mark_reconciliation_needed(ip);
+        }
+#else
+        if (run_bfban("remove", ip) < 0) mark_reconciliation_needed(ip);
 #endif
         return -ENOSPC;
     }
@@ -394,11 +410,13 @@ static int add(const char *ip, time_t expiry, struct entry *entries, size_t *cou
         --*count;
         rebuild_index(entries, *count, index);
 #ifdef BFBAN_WITH_LIBBPFILTER
-        if (direct_enabled && direct_update(ip, false) < 0)
-            fprintf(stderr, "bfband: state rollback failed for %s\n", ip);
+        if (direct_enabled) {
+            if (direct_update(ip, false) < 0) mark_reconciliation_needed(ip);
+        } else if (run_bfban("remove", ip) < 0) {
+            mark_reconciliation_needed(ip);
+        }
 #else
-        if (run_bfban("remove", ip) < 0)
-            fprintf(stderr, "bfband: state rollback failed for %s\n", ip);
+        if (run_bfban("remove", ip) < 0) mark_reconciliation_needed(ip);
 #endif
     }
     return r;
@@ -425,11 +443,13 @@ static int remove_ip(const char *ip, struct entry *entries, size_t *count,
         ++*count;
         rebuild_index(entries, *count, index);
 #ifdef BFBAN_WITH_LIBBPFILTER
-        if (direct_enabled && direct_update(ip, true) < 0)
-            fprintf(stderr, "bfband: state rollback failed for %s\n", ip);
+        if (direct_enabled) {
+            if (direct_update(ip, true) < 0) mark_reconciliation_needed(ip);
+        } else if (run_bfban("add", ip) < 0) {
+            mark_reconciliation_needed(ip);
+        }
 #else
-        if (run_bfban("add", ip) < 0)
-            fprintf(stderr, "bfband: state rollback failed for %s\n", ip);
+        if (run_bfban("add", ip) < 0) mark_reconciliation_needed(ip);
 #endif
         if (save(entries, *count) < 0)
             fprintf(stderr, "bfband: could not restore previous state for %s\n", ip);
@@ -463,10 +483,14 @@ static int add_many(const char *const *addresses, size_t item_count,
     }
     if (r < 0) {
 #ifdef BFBAN_WITH_LIBBPFILTER
-        if (direct_enabled) (void)direct_update_many(new_addresses, new_count, false);
-        else
+        if (direct_enabled) {
+            if (direct_update_many(new_addresses, new_count, false) < 0)
+                mark_reconciliation_needed("batch add rollback");
+        } else
 #endif
-            for (size_t i = 0; i < new_count; ++i) (void)run_bfban("remove", new_addresses[i]);
+            for (size_t i = 0; i < new_count; ++i)
+                if (run_bfban("remove", new_addresses[i]) < 0)
+                    mark_reconciliation_needed(new_addresses[i]);
         free(new_addresses);
         return r;
     }
@@ -480,9 +504,18 @@ static int add_many(const char *const *addresses, size_t item_count,
             *count = previous_count;
             rebuild_index(entries, *count, index);
 #ifdef BFBAN_WITH_LIBBPFILTER
-            if (direct_enabled) (void)direct_update_many(new_addresses, new_count, false);
+            if (direct_enabled) {
+                if (direct_update_many(new_addresses, new_count, false) < 0)
+                    mark_reconciliation_needed("batch index rollback");
+            } else {
+                for (size_t n = 0; n < inserted; ++n)
+                    if (run_bfban("remove", new_addresses[n]) < 0)
+                        mark_reconciliation_needed(new_addresses[n]);
+            }
 #else
-            for (size_t n = 0; n < inserted; ++n) (void)run_bfban("remove", new_addresses[n]);
+            for (size_t n = 0; n < inserted; ++n)
+                if (run_bfban("remove", new_addresses[n]) < 0)
+                    mark_reconciliation_needed(new_addresses[n]);
 #endif
             if (save(entries, *count) < 0)
                 fprintf(stderr, "bfband: could not restore previous batch state\n");
@@ -495,12 +528,18 @@ static int add_many(const char *const *addresses, size_t item_count,
         *count = previous_count;
         rebuild_index(entries, *count, index);
 #ifdef BFBAN_WITH_LIBBPFILTER
-        if (direct_enabled && direct_update_many(new_addresses, new_count, false) < 0)
-            fprintf(stderr, "bfband: batch state rollback failed\n");
+        if (direct_enabled) {
+            if (direct_update_many(new_addresses, new_count, false) < 0)
+                mark_reconciliation_needed("batch state rollback");
+        } else {
+            for (size_t i = 0; i < new_count; ++i)
+                if (run_bfban("remove", new_addresses[i]) < 0)
+                    mark_reconciliation_needed(new_addresses[i]);
+        }
 #else
         for (size_t i = 0; i < new_count; ++i)
             if (run_bfban("remove", new_addresses[i]) < 0)
-                fprintf(stderr, "bfband: batch state rollback failed for %s\n", new_addresses[i]);
+                mark_reconciliation_needed(new_addresses[i]);
 #endif
         if (save(entries, *count) < 0)
             fprintf(stderr, "bfband: could not restore previous batch state\n");
@@ -537,10 +576,19 @@ static int request(const char *line, struct entry *entries, size_t *count,
     char cmd[16], ip[MAX_KEY]; long long ttl = 0;
     if (sscanf(line, "%15s", cmd) != 1) return -EINVAL;
     if (strcmp(cmd, "PING") == 0) return 1;
-    if (strcmp(cmd, "INIT") == 0) return reconcile_kernel(entries, *count);
+    if (strcmp(cmd, "INIT") == 0) {
+        int reconcile_result = reconcile_kernel(entries, *count);
+        if (reconcile_result >= 0) reconciliation_needed = false;
+        return reconcile_result;
+    }
+    if (reconciliation_needed && strcmp(cmd, "FLUSH") != 0) return -EUCLEAN;
     if (strcmp(cmd, "FLUSH") == 0) {
         int r = run_bfban("flush", NULL); if (r < 0) return r;
-        *count = 0; unlink(state_path()); return 0;
+        *count = 0;
+        memset(index, 0, INDEX_SLOTS * sizeof(*index));
+        r = save(entries, 0);
+        if (r < 0) mark_reconciliation_needed("flush state save");
+        return r;
     }
     if (strcmp(cmd, "LIST") == 0) {
         size_t used = 0;
@@ -619,7 +667,15 @@ int main(void)
             continue;
         }
     }
-    if (changed) { rebuild_index(entries, count, index); (void)save(entries, count); }
+    if (changed) {
+        rebuild_index(entries, count, index);
+        r = save(entries, count);
+        if (r < 0) {
+            fprintf(stderr, "bfband: could not persist expired-entry cleanup: %s\n",
+                    strerror(-r));
+            free(entries); free(index); return 1;
+        }
+    }
     r = reconcile_kernel(entries, count);
     if (r < 0) { free(entries); free(index); return 1; }
     if (parent_dir(sock_path()) < 0) { free(entries); free(index); return 1; }

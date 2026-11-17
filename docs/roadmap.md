@@ -27,6 +27,13 @@ applies them to the bpfilter chain.
 - [x] Bounded two-second request reads for sequential Unix-socket clients.
 - [x] Preflight capacity checks and best-effort kernel/state rollback.
 - [x] State writes with file `fsync` and attempted directory `fsync`.
+- [x] Symmetric direct/CLI rollback paths when `libbpfilter` is compiled in but
+  runtime direct mode is disabled.
+- [x] `FLUSH` clears both the entry table and the daemon hash index.
+- [x] Partial batch rollback failures are reported and block further mutations
+  until an explicit `INIT` reconciliation succeeds.
+- [x] Failed persistence of expired-entry cleanup prevents an unsafe daemon
+  startup.
 - [x] Direct `libbpfilter` update path when the development package is present.
 - [x] CLI fallback through `bfban` and `bfcli` when direct mode is unavailable.
 - [x] Direct batch updates grouped by address family and exact/CIDR set.
