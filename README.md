@@ -44,6 +44,7 @@ through the direct C API. If it is unavailable, it falls back to the installed
 | Direct `libbpfilter` update path with CLI fallback | implemented when `bpfilter.pc` is available |
 | systemd state recovery and TTL handling | implemented |
 | `bfobserve` interface listing, top-N, JSON, and operator suggestions | implemented using AF_PACKET |
+| Open-addressing daemon index for fast ADD/DEL/TTL lookup | implemented |
 | Per-source eBPF/XDP telemetry, automatic detection, and per-jail namespaces | roadmap |
 
 The practical “wow” features are deliberately operational rather than
@@ -380,8 +381,10 @@ the Ubuntu target. Rocky Linux 9 is useful for fallback/build checks, but its
 
 ## Memory and limitations
 
-The current daemon reserves a fixed table for up to 65,536 entries, roughly
-4.5 MiB before normal process overhead. Actual BPF-map memory depends on map
+The current daemon reserves a fixed table for up to 65,536 entries and uses a
+bounded open-addressing index for ADD/DEL/TTL lookup. The entry table is
+roughly 4.5 MiB before normal process overhead; the index adds bounded memory.
+Actual BPF-map memory depends on map
 type, key/value size, capacity, allocator overhead, and IPv4/IPv6/LPM layout:
 
 ```sh

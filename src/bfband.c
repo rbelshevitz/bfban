@@ -8,6 +8,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,8 +31,10 @@
 #define MAX_BANS 65536
 #define MAX_KEY 64
 #define BUFSIZE 512
+#define INDEX_SLOTS 131072
 
 struct entry { char ip[MAX_KEY]; time_t expires; };
+struct index_slot { uint64_t hash; size_t entry; bool used; };
 static volatile sig_atomic_t stopping;
 
 #ifdef BFBAN_WITH_LIBBPFILTER
@@ -141,20 +144,77 @@ static int run_bfban(const char *command, const char *ip)
     return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -EIO;
 }
 
-static int load(struct entry *entries, size_t *count)
+static uint64_t hash_ip(const char *ip)
+{
+    uint64_t hash = 1469598103934665603ULL;
+    while (*ip) { hash ^= (unsigned char)*ip++; hash *= 1099511628211ULL; }
+    return hash ? hash : 1;
+}
+
+static int index_insert(const struct entry *entries, size_t entry,
+                        struct index_slot *index)
+{
+    uint64_t hash = hash_ip(entries[entry].ip);
+    size_t start = hash % INDEX_SLOTS;
+    for (size_t i = 0; i < INDEX_SLOTS; ++i) {
+        struct index_slot *slot = &index[(start + i) % INDEX_SLOTS];
+        if (!slot->used) {
+            slot->used = true; slot->hash = hash; slot->entry = entry;
+            return 0;
+        }
+    }
+    return -ENOSPC;
+}
+
+static void rebuild_index(const struct entry *entries, size_t count,
+                          struct index_slot *index)
+{
+    memset(index, 0, INDEX_SLOTS * sizeof(*index));
+    for (size_t n = 0; n < count; ++n) {
+        size_t start = hash_ip(entries[n].ip) % INDEX_SLOTS;
+        for (size_t i = 0; i < INDEX_SLOTS; ++i) {
+            struct index_slot *slot = &index[(start + i) % INDEX_SLOTS];
+            if (!slot->used) {
+                (void)index_insert(entries, n, index);
+                break;
+            }
+        }
+    }
+}
+
+static ssize_t find(const struct entry *entries, const struct index_slot *index,
+                    const char *ip)
+{
+    uint64_t hash = hash_ip(ip);
+    size_t start = hash % INDEX_SLOTS;
+    for (size_t i = 0; i < INDEX_SLOTS; ++i) {
+        const struct index_slot *slot = &index[(start + i) % INDEX_SLOTS];
+        if (!slot->used) return -1;
+        if (slot->hash == hash && strcmp(entries[slot->entry].ip, ip) == 0)
+            return (ssize_t)slot->entry;
+    }
+    return -1;
+}
+
+static int load(struct entry *entries, size_t *count, struct index_slot *index)
 {
     FILE *f = fopen(state_path(), "r");
     char line[MAX_KEY + 64];
     *count = 0;
+    memset(index, 0, INDEX_SLOTS * sizeof(*index));
     if (!f) return errno == ENOENT ? 0 : -errno;
     while (fgets(line, sizeof(line), f)) {
         long long expiry = 0;
         char ip[MAX_KEY];
         if (sscanf(line, "%63s %lld", ip, &expiry) < 1 || !valid_ip(ip)) continue;
         if (*count == MAX_BANS) { fclose(f); return -ENOSPC; }
+        if (find(entries, index, ip) >= 0) continue;
         strcpy(entries[*count].ip, ip);
         entries[*count].expires = (time_t)expiry;
         ++*count;
+        if (index_insert(entries, *count - 1, index) < 0) {
+            fclose(f); return -ENOSPC;
+        }
     }
     fclose(f);
     return 0;
@@ -177,16 +237,10 @@ static int save(const struct entry *entries, size_t count)
     return 0;
 }
 
-static ssize_t find(const struct entry *entries, size_t count, const char *ip)
+static int add(const char *ip, time_t expiry, struct entry *entries, size_t *count,
+               struct index_slot *index)
 {
-    for (size_t i = 0; i < count; ++i)
-        if (strcmp(entries[i].ip, ip) == 0) return (ssize_t)i;
-    return -1;
-}
-
-static int add(const char *ip, time_t expiry, struct entry *entries, size_t *count)
-{
-    ssize_t i = find(entries, *count, ip);
+    ssize_t i = find(entries, index, ip);
     if (i >= 0) { entries[i].expires = expiry; return save(entries, *count); }
     int r;
 #ifdef BFBAN_WITH_LIBBPFILTER
@@ -197,12 +251,14 @@ static int add(const char *ip, time_t expiry, struct entry *entries, size_t *cou
     if (r < 0) return r;
     if (*count == MAX_BANS) return -ENOSPC;
     strcpy(entries[*count].ip, ip); entries[*count].expires = expiry; ++*count;
+    if (index_insert(entries, *count - 1, index) < 0) return -ENOSPC;
     return save(entries, *count);
 }
 
-static int remove_ip(const char *ip, struct entry *entries, size_t *count)
+static int remove_ip(const char *ip, struct entry *entries, size_t *count,
+                     struct index_slot *index)
 {
-    ssize_t i = find(entries, *count, ip);
+    ssize_t i = find(entries, index, ip);
     if (i < 0) return 0;
     int r;
 #ifdef BFBAN_WITH_LIBBPFILTER
@@ -212,11 +268,12 @@ static int remove_ip(const char *ip, struct entry *entries, size_t *count)
 #endif
     if (r < 0) return r;
     entries[i] = entries[*count - 1]; --*count;
+    rebuild_index(entries, *count, index);
     return save(entries, *count);
 }
 
 static int request(const char *line, struct entry *entries, size_t *count,
-                   char *response, size_t size)
+                   struct index_slot *index, char *response, size_t size)
 {
     char cmd[16], ip[MAX_KEY]; long long ttl = 0;
     if (sscanf(line, "%15s", cmd) != 1) return -EINVAL;
@@ -238,19 +295,21 @@ static int request(const char *line, struct entry *entries, size_t *count,
     }
     if (strcmp(cmd, "ADD") == 0 && sscanf(line, "%15s %63s %lld", cmd, ip, &ttl) >= 2) {
         if (!valid_ip(ip) || ttl < 0) return -EINVAL;
-        return add(ip, ttl ? time(NULL) + (time_t)ttl : 0, entries, count);
+        return add(ip, ttl ? time(NULL) + (time_t)ttl : 0, entries, count, index);
     }
     if (strcmp(cmd, "DEL") == 0 && sscanf(line, "%15s %63s", cmd, ip) == 2) {
         if (!valid_ip(ip)) return -EINVAL;
-        return remove_ip(ip, entries, count);
+        return remove_ip(ip, entries, count, index);
     }
     return -EINVAL;
 }
 
 int main(void)
 {
-    struct entry entries[MAX_BANS]; size_t count;
-    int r = load(entries, &count);
+    struct entry entries[MAX_BANS];
+    struct index_slot index[INDEX_SLOTS];
+    size_t count;
+    int r = load(entries, &count, index);
     if (r < 0) return 1;
     r = run_bfban("init", NULL);
     if (r < 0) return 1;
@@ -283,7 +342,7 @@ int main(void)
         time_t now = time(NULL);
         for (size_t i = 0; i < count;) {
             if (entries[i].expires && entries[i].expires <= now)
-                (void)remove_ip(entries[i].ip, entries, &count);
+                (void)remove_ip(entries[i].ip, entries, &count, index);
             else ++i;
         }
         struct pollfd pfd = {.fd = server, .events = POLLIN};
@@ -292,7 +351,7 @@ int main(void)
         if (client < 0) continue;
         char line[BUFSIZE] = {0}, response[BUFSIZE] = {0};
         ssize_t n = read(client, line, sizeof(line) - 1);
-        int result = n > 0 ? request(line, entries, &count, response, sizeof(response)) : -EINVAL;
+        int result = n > 0 ? request(line, entries, &count, index, response, sizeof(response)) : -EINVAL;
         if (result == 1 && !response[0]) strcpy(response, "OK\n");
         if (result < 0) snprintf(response, sizeof(response), "ERR %s\n", strerror(-result));
         (void)dprintf(client, "%s", response);
