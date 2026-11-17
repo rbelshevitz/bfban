@@ -95,6 +95,11 @@ Debian 13 (6.12), Fedora 40 (6.8), RHEL/Rocky/Alma 10 (6.12), Ubuntu 22.04 с
 HWE 6.8. RHEL/Rocky/Alma 9 (5.14) и Debian 12 (6.1) требуют нового
 поддерживаемого ядра или backport.
 
+Полный англоязычный план стенда и проверки для Rocky Linux 10, Debian 13 и
+Ubuntu 24.04 находится в [`docs/validation-lab.md`](docs/validation-lab.md).
+Rocky Linux 9 подходит для проверки fallback-сборки, но не для подтверждения
+целевого kernel compatibility.
+
 ### 2. Собрать и установить
 
 ```sh

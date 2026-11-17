@@ -274,6 +274,14 @@ and logging. Candidate tools are `pktgen`, `trafgen`, `iperf3`, `perf stat`,
 - [bpfilter rules and verdicts](https://bpfilter.io/usage/reference/rules.html)
 - [nftables sets](https://wiki.netfilter.org/wiki-nftables/index.php/Sets)
 
+## Validation lab
+
+The reproducible cross-distribution test plan is in
+[`docs/validation-lab.md`](docs/validation-lab.md). Use Rocky Linux 10 as the
+RHEL-family target, Debian 13 as the Debian target, and Ubuntu 24.04 LTS as
+the Ubuntu target. Rocky Linux 9 is useful for fallback/build checks, but its
+5.14 kernel is not the primary compatibility target.
+
 ## Memory and limitations
 
 The current daemon reserves a fixed table for up to 65,536 entries, roughly
@@ -287,7 +295,7 @@ sudo bpftool map dump id MAP_ID
 
 The MVP still needs per-jail namespaces, atomic CIDR-aware feed batches,
 bounded daemon storage, measured benchmarks, stronger systemd hardening, and
-eBPF per-source telemetry. See [TODO.md](TODO.md).
+eBPF per-source telemetry.
 
 ## License
 
