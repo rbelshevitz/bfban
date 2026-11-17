@@ -35,14 +35,19 @@ $(BUILD_DIR)/etc/systemd/bfband.service: etc/systemd/bfband.service.in | $(BUILD
 	install -d $(dir $@)
 	sed -e 's|@PREFIX@|$(PREFIX)|g' $< > $@
 
-install: all $(BUILD_DIR)/etc/bfban/bfban.env $(BUILD_DIR)/etc/systemd/bfband.service
+$(BUILD_DIR)/etc/fail2ban/action.d/bfban.conf: etc/fail2ban/action.d/bfban.conf.in | $(BUILD_DIR)
+	install -d $(dir $@)
+	sed -e 's|@PREFIX@|$(PREFIX)|g' $< > $@
+
+install: all $(BUILD_DIR)/etc/bfban/bfban.env $(BUILD_DIR)/etc/systemd/bfband.service \
+	$(BUILD_DIR)/etc/fail2ban/action.d/bfban.conf
 	install -d $(DESTDIR)$(PREFIX)/sbin
 	install -m 0755 $(BUILD_DIR)/bfban $(DESTDIR)$(PREFIX)/sbin/bfban
 	install -m 0755 $(BUILD_DIR)/bfband $(DESTDIR)$(PREFIX)/sbin/bfband
 	install -m 0755 $(BUILD_DIR)/bfbandctl $(DESTDIR)$(PREFIX)/sbin/bfbandctl
 	install -m 0755 $(BUILD_DIR)/bfobserve $(DESTDIR)$(PREFIX)/sbin/bfobserve
 	install -d $(DESTDIR)/etc/fail2ban/action.d
-	install -m 0644 etc/fail2ban/action.d/bfban.conf $(DESTDIR)/etc/fail2ban/action.d/bfban.conf
+	install -m 0644 $(BUILD_DIR)/etc/fail2ban/action.d/bfban.conf $(DESTDIR)/etc/fail2ban/action.d/bfban.conf
 	install -d $(DESTDIR)/etc/bfban
 	install -m 0644 $(BUILD_DIR)/etc/bfban/bfban.env $(DESTDIR)/etc/bfban/bfban.env
 	install -d $(DESTDIR)/etc/systemd/system

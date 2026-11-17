@@ -37,6 +37,8 @@ EOF
 mkdir -p build/etc/bfban build/etc/systemd
 sed "s|@PREFIX@|$prefix|g" etc/bfban/bfban.env.in > build/etc/bfban/bfban.env
 sed "s|@PREFIX@|$prefix|g" etc/systemd/bfband.service.in > build/etc/systemd/bfband.service
+mkdir -p build/etc/fail2ban/action.d
+sed "s|@PREFIX@|$prefix|g" etc/fail2ban/action.d/bfban.conf.in > build/etc/fail2ban/action.d/bfban.conf
 
 echo "prefix: $prefix"
 echo "compiler: $cc"

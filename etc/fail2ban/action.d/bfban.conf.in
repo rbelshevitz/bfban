@@ -1,0 +1,9 @@
+[Definition]
+actionstart = @PREFIX@/sbin/bfbandctl init
+actionstop = @PREFIX@/sbin/bfbandctl flush
+actioncheck = @PREFIX@/sbin/bfbandctl ping
+actionban = @PREFIX@/sbin/bfbandctl add <ip>
+actionunban = @PREFIX@/sbin/bfbandctl remove <ip>
+
+[Init]
+name = default

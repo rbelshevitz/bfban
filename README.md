@@ -239,6 +239,16 @@ actionunban -> bfbandctl remove <ip>
 actionstop  -> bfbandctl flush
 ```
 
+The daemon protocol also accepts a bounded batch request:
+
+```text
+ADD_MANY 203.0.113.10 198.51.100.0/24
+```
+
+`bfbandctl add-many FILE` uses this path. In direct mode, exact and CIDR
+entries are grouped by bpfilter set before the kernel update; the fallback
+remains compatible with the CLI backend.
+
 Create `/etc/fail2ban/jail.d/sshd-bfban.local`:
 
 ```ini
@@ -409,9 +419,8 @@ sudo bpftool map show
 sudo bpftool map dump id MAP_ID
 ```
 
-The MVP still needs per-jail namespaces, batched CIDR-aware feed updates,
-bounded daemon storage, measured benchmarks, stronger systemd hardening, and
-eBPF per-source telemetry.
+The MVP still needs per-jail namespaces, measured benchmarks, stronger systemd
+hardening, and eBPF per-source telemetry.
 
 ## License
 
