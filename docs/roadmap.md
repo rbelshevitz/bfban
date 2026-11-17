@@ -23,6 +23,10 @@ applies them to the bpfilter chain.
 - [x] Bounded daemon storage and an open-addressing lookup index.
 - [x] Expired-entry cleanup with index rebuild.
 - [x] Kernel/state reconciliation during daemon initialization.
+- [x] Deferred retry for failed TTL removals instead of a busy loop.
+- [x] Bounded two-second request reads for sequential Unix-socket clients.
+- [x] Preflight capacity checks and best-effort kernel/state rollback.
+- [x] State writes with file `fsync` and attempted directory `fsync`.
 - [x] Direct `libbpfilter` update path when the development package is present.
 - [x] CLI fallback through `bfban` and `bfcli` when direct mode is unavailable.
 - [x] Direct batch updates grouped by address family and exact/CIDR set.
@@ -50,6 +54,11 @@ These are validation gates, not new product features:
   benchmark output before making a performance claim.
 - [ ] Verify the installed systemd and Fail2ban files on a clean host with both
   `/usr/local` and a non-default prefix.
+
+State changes use a compensating rollback because the kernel update and the
+state-file rename cannot be one physical transaction. A failed rollback is
+reported and the next daemon initialization reconciles the state with the
+kernel chain.
 
 ## Explicitly outside v1
 

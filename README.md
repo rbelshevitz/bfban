@@ -311,6 +311,11 @@ ADD_MANY 203.0.113.10 198.51.100.0/24
 entries are grouped by bpfilter set before the kernel update; the fallback
 remains compatible with the CLI backend.
 
+The daemon `fsync`s the state file and then attempts to `fsync` its directory.
+Kernel changes and the state file are not one physical transaction,
+so a failed state write triggers a best-effort kernel rollback and startup
+reconciliation is the final recovery path.
+
 The Fail2ban `actioncheck` command checks that the daemon socket is alive. It
 is not a packet-path benchmark and does not claim that every upstream hook is
 healthy; `bfbandctl init`/daemon reconciliation is the recovery operation.

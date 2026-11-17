@@ -5,6 +5,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
 #include <signal.h>
@@ -130,13 +131,23 @@ static void signal_handler(int sig) { (void)sig; stopping = 1; }
 static ssize_t read_request(int fd, char *buffer, size_t size)
 {
     size_t used = 0;
+    time_t deadline = time(NULL) + 2;
     while (used + 1 < size) {
+        time_t remaining = deadline - time(NULL);
+        if (remaining <= 0) return -ETIMEDOUT;
+        struct pollfd pfd = {.fd = fd, .events = POLLIN};
+        int ready = poll(&pfd, 1, (int)(remaining * 1000));
+        if (ready < 0 && errno == EINTR) continue;
+        if (ready < 0) return -errno;
+        if (ready == 0) return -ETIMEDOUT;
         ssize_t n = read(fd, buffer + used, size - used - 1);
         if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return -ETIMEDOUT;
         if (n <= 0) break;
         used += (size_t)n;
         if (memchr(buffer, '\n', used)) break;
     }
+    if (!memchr(buffer, '\n', used) && used + 1 >= size) return -E2BIG;
     buffer[used] = '\0';
     return used ? (ssize_t)used : -1;
 }
@@ -316,11 +327,34 @@ static int save(const struct entry *entries, size_t count)
         (int)sizeof(temp)) return -ENAMETOOLONG;
     FILE *f = fopen(temp, "w");
     if (!f) return -errno;
-    for (size_t i = 0; i < count; ++i)
-        fprintf(f, "%s %lld\n", entries[i].ip, (long long)entries[i].expires);
-    if (fclose(f) != 0 || rename(temp, state_path()) < 0) {
+    for (size_t i = 0; i < count; ++i) {
+        if (fprintf(f, "%s %lld\n", entries[i].ip,
+                    (long long)entries[i].expires) < 0) {
+            int e = errno ? errno : EIO;
+            fclose(f); unlink(temp); return -e;
+        }
+    }
+    int flush_result = fflush(f);
+    int file_sync_result = flush_result == 0 ? fsync(fileno(f)) : -1;
+    int close_result = fclose(f);
+    if (flush_result != 0 || file_sync_result < 0 || close_result != 0) {
         int e = errno; unlink(temp); return -e;
     }
+    if (rename(temp, state_path()) < 0) { int e = errno; unlink(temp); return -e; }
+    char directory[PATH_MAX];
+    if (strlen(state_path()) >= sizeof(directory)) return -ENAMETOOLONG;
+    strcpy(directory, state_path());
+    char *slash = strrchr(directory, '/');
+    if (slash && slash != directory) *slash = '\0';
+    else strcpy(directory, ".");
+    int directory_fd = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (directory_fd < 0) return -errno;
+    int sync_result = fsync(directory_fd);
+    int sync_error = errno;
+    close(directory_fd);
+    if (sync_result < 0)
+        fprintf(stderr, "bfband: warning: could not fsync state directory: %s\n",
+                strerror(sync_error));
     return 0;
 }
 
@@ -328,7 +362,18 @@ static int add(const char *ip, time_t expiry, struct entry *entries, size_t *cou
                struct index_slot *index)
 {
     ssize_t i = find(entries, index, ip);
-    if (i >= 0) { entries[i].expires = expiry; return save(entries, *count); }
+    if (i >= 0) {
+        time_t previous = entries[i].expires;
+        entries[i].expires = expiry;
+        int save_result = save(entries, *count);
+        if (save_result < 0) {
+            entries[i].expires = previous;
+            if (save(entries, *count) < 0)
+                fprintf(stderr, "bfband: could not restore previous state for %s\n", ip);
+        }
+        return save_result;
+    }
+    if (*count >= MAX_BANS) return -ENOSPC;
     int r;
 #ifdef BFBAN_WITH_LIBBPFILTER
     r = direct_enabled ? direct_update(ip, true) : run_bfban("add", ip);
@@ -336,10 +381,27 @@ static int add(const char *ip, time_t expiry, struct entry *entries, size_t *cou
     r = run_bfban("add", ip);
 #endif
     if (r < 0) return r;
-    if (*count == MAX_BANS) return -ENOSPC;
     strcpy(entries[*count].ip, ip); entries[*count].expires = expiry; ++*count;
-    if (index_insert(entries, *count - 1, index) < 0) return -ENOSPC;
-    return save(entries, *count);
+    if (index_insert(entries, *count - 1, index) < 0) {
+        --*count;
+#ifdef BFBAN_WITH_LIBBPFILTER
+        if (direct_enabled) (void)direct_update(ip, false);
+#endif
+        return -ENOSPC;
+    }
+    r = save(entries, *count);
+    if (r < 0) {
+        --*count;
+        rebuild_index(entries, *count, index);
+#ifdef BFBAN_WITH_LIBBPFILTER
+        if (direct_enabled && direct_update(ip, false) < 0)
+            fprintf(stderr, "bfband: state rollback failed for %s\n", ip);
+#else
+        if (run_bfban("remove", ip) < 0)
+            fprintf(stderr, "bfband: state rollback failed for %s\n", ip);
+#endif
+    }
+    return r;
 }
 
 static int remove_ip(const char *ip, struct entry *entries, size_t *count,
@@ -347,6 +409,7 @@ static int remove_ip(const char *ip, struct entry *entries, size_t *count,
 {
     ssize_t i = find(entries, index, ip);
     if (i < 0) return 0;
+    struct entry removed = entries[i];
     int r;
 #ifdef BFBAN_WITH_LIBBPFILTER
     r = direct_enabled ? direct_update(ip, false) : run_bfban("remove", ip);
@@ -356,7 +419,22 @@ static int remove_ip(const char *ip, struct entry *entries, size_t *count,
     if (r < 0) return r;
     entries[i] = entries[*count - 1]; --*count;
     rebuild_index(entries, *count, index);
-    return save(entries, *count);
+    r = save(entries, *count);
+    if (r < 0) {
+        entries[*count] = removed;
+        ++*count;
+        rebuild_index(entries, *count, index);
+#ifdef BFBAN_WITH_LIBBPFILTER
+        if (direct_enabled && direct_update(ip, true) < 0)
+            fprintf(stderr, "bfband: state rollback failed for %s\n", ip);
+#else
+        if (run_bfban("add", ip) < 0)
+            fprintf(stderr, "bfband: state rollback failed for %s\n", ip);
+#endif
+        if (save(entries, *count) < 0)
+            fprintf(stderr, "bfband: could not restore previous state for %s\n", ip);
+    }
+    return r;
 }
 
 static int add_many(const char *const *addresses, size_t item_count,
@@ -365,26 +443,70 @@ static int add_many(const char *const *addresses, size_t item_count,
 {
     if (!item_count) return 0;
     int r = 0;
+    const char **new_addresses = calloc(item_count, sizeof(*new_addresses));
+    if (!new_addresses) return -ENOMEM;
+    size_t new_count = 0;
+    for (size_t i = 0; i < item_count; ++i) {
+        if (find(entries, index, addresses[i]) < 0) {
+            if (*count + new_count >= MAX_BANS) { free(new_addresses); return -ENOSPC; }
+            new_addresses[new_count++] = addresses[i];
+        }
+    }
+    if (!new_count) { free(new_addresses); return save(entries, *count); }
 #ifdef BFBAN_WITH_LIBBPFILTER
-    if (direct_enabled) r = direct_update_many(addresses, item_count, true);
+    if (direct_enabled) r = direct_update_many(new_addresses, new_count, true);
     else
 #endif
     {
-        for (size_t i = 0; i < item_count && r >= 0; ++i)
-            r = run_bfban("add", addresses[i]);
+        for (size_t i = 0; i < new_count && r >= 0; ++i)
+            r = run_bfban("add", new_addresses[i]);
     }
-    if (r < 0) return r;
+    if (r < 0) {
+#ifdef BFBAN_WITH_LIBBPFILTER
+        if (direct_enabled) (void)direct_update_many(new_addresses, new_count, false);
+        else
+#endif
+            for (size_t i = 0; i < new_count; ++i) (void)run_bfban("remove", new_addresses[i]);
+        free(new_addresses);
+        return r;
+    }
     time_t expiry = 0;
-    for (size_t i = 0; i < item_count; ++i) {
-        ssize_t existing = find(entries, index, addresses[i]);
-        if (existing >= 0) continue;
-        if (*count == MAX_BANS) return -ENOSPC;
-        strcpy(entries[*count].ip, addresses[i]);
+    size_t previous_count = *count;
+    size_t inserted = 0;
+    for (size_t i = 0; i < new_count; ++i) {
+        strcpy(entries[*count].ip, new_addresses[i]);
         entries[*count].expires = expiry;
-        if (index_insert(entries, *count, index) < 0) return -ENOSPC;
-        ++*count;
+        if (index_insert(entries, *count, index) < 0) {
+            *count = previous_count;
+            rebuild_index(entries, *count, index);
+#ifdef BFBAN_WITH_LIBBPFILTER
+            if (direct_enabled) (void)direct_update_many(new_addresses, new_count, false);
+#else
+            for (size_t n = 0; n < inserted; ++n) (void)run_bfban("remove", new_addresses[n]);
+#endif
+            if (save(entries, *count) < 0)
+                fprintf(stderr, "bfband: could not restore previous batch state\n");
+            free(new_addresses); return -ENOSPC;
+        }
+        ++*count; ++inserted;
     }
-    return save(entries, *count);
+    r = save(entries, *count);
+    if (r < 0) {
+        *count = previous_count;
+        rebuild_index(entries, *count, index);
+#ifdef BFBAN_WITH_LIBBPFILTER
+        if (direct_enabled && direct_update_many(new_addresses, new_count, false) < 0)
+            fprintf(stderr, "bfband: batch state rollback failed\n");
+#else
+        for (size_t i = 0; i < new_count; ++i)
+            if (run_bfban("remove", new_addresses[i]) < 0)
+                fprintf(stderr, "bfband: batch state rollback failed for %s\n", new_addresses[i]);
+#endif
+        if (save(entries, *count) < 0)
+            fprintf(stderr, "bfband: could not restore previous batch state\n");
+    }
+    free(new_addresses);
+    return r;
 }
 
 static int reconcile_kernel(const struct entry *entries, size_t count)
@@ -516,9 +638,14 @@ int main(void)
     while (!stopping) {
         time_t now = time(NULL);
         for (size_t i = 0; i < count;) {
-            if (entries[i].expires && entries[i].expires <= now)
-                (void)remove_ip(entries[i].ip, entries, &count, index);
-            else ++i;
+            if (entries[i].expires && entries[i].expires <= now) {
+                int remove_result = remove_ip(entries[i].ip, entries, &count, index);
+                if (remove_result < 0) {
+                    fprintf(stderr, "bfband: deferred TTL removal for %s: %s\n",
+                            entries[i].ip, strerror(-remove_result));
+                    ++i;
+                }
+            } else ++i;
         }
         struct pollfd pfd = {.fd = server, .events = POLLIN};
         if (poll(&pfd, 1, 1000) <= 0) continue;
@@ -534,7 +661,8 @@ int main(void)
         }
         char line[BUFSIZE] = {0}, response[BUFSIZE] = {0};
         ssize_t n = read_request(client, line, sizeof(line));
-        int result = n > 0 ? request(line, entries, &count, index, response, sizeof(response)) : -EINVAL;
+        int result = n > 0 ? request(line, entries, &count, index, response, sizeof(response))
+                           : (n < 0 ? (int)n : -EINVAL);
         if (result == 1 && !response[0]) strcpy(response, "OK\n");
         if (result < 0) snprintf(response, sizeof(response), "ERR %s\n", strerror(-result));
         (void)dprintf(client, "%s", response);
