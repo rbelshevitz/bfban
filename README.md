@@ -479,6 +479,18 @@ RHEL-family target, Debian 13 as the Debian target, and Ubuntu 24.04 LTS as
 the Ubuntu target. Rocky Linux 9 is useful for fallback/build checks, but its
 5.14 kernel is not the primary compatibility target.
 
+For a local regression run:
+
+```sh
+make test
+```
+
+The test build enables private fault-injection hooks. As root, it exercises
+backend failure on a selected operation, failed state persistence before and
+after `rename()`, batch rollback, reconciliation blocking, CIDR handling, and
+the daemon request timeout. Without root, the basic CLI checks still run and
+the root-only daemon cases are reported as `SKIP`, not `PASS`.
+
 ## Memory and limitations
 
 The current daemon reserves a fixed table for up to 65,536 entries and uses a

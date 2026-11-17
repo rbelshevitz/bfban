@@ -42,6 +42,40 @@ struct index_slot { uint64_t hash; size_t entry; bool used; };
 static volatile sig_atomic_t stopping;
 static bool reconciliation_needed;
 
+#ifdef BFBAN_TEST_HOOKS
+static unsigned long test_backend_calls;
+static unsigned long test_save_calls;
+
+static int test_number(const char *name, unsigned long *counter)
+{
+    const char *value = getenv(name);
+    char *end = NULL;
+    unsigned long target;
+    if (!value || !*value) return 0;
+    target = strtoul(value, &end, 10);
+    if (*value == '-' || *end != '\0' || target == 0) return 0;
+    ++*counter;
+    return *counter == target ? -EIO : 0;
+}
+
+static int test_backend_call(const char *command, const char *ip)
+{
+    const char *log_path = getenv("BFBAN_TEST_BACKEND_LOG");
+    if (!log_path || !*log_path) return 0;
+    FILE *log = fopen(log_path, "a");
+    if (!log) return -errno;
+    if (fprintf(log, "%s%s%s\n", command, ip ? " " : "", ip ? ip : "") < 0) {
+        int e = errno ? errno : EIO;
+        fclose(log);
+        return -e;
+    }
+    if (fclose(log) != 0) return -errno;
+    const char *fail_command = getenv("BFBAN_TEST_FAIL_BACKEND_COMMAND");
+    if (fail_command && strcmp(fail_command, command) != 0) return 0;
+    return test_number("BFBAN_TEST_FAIL_BACKEND_AT", &test_backend_calls);
+}
+#endif
+
 #ifdef BFBAN_WITH_LIBBPFILTER
 static bool direct_enabled;
 #endif
@@ -224,6 +258,9 @@ static int parent_dir(const char *path)
 
 static int run_bfban(const char *command, const char *ip)
 {
+#ifdef BFBAN_TEST_HOOKS
+    if (getenv("BFBAN_TEST_BACKEND_LOG")) return test_backend_call(command, ip);
+#endif
     pid_t pid = fork();
     if (pid < 0) return -errno;
     if (pid == 0) {
@@ -322,6 +359,11 @@ static int load(struct entry *entries, size_t *count, struct index_slot *index)
 
 static int save(const struct entry *entries, size_t count)
 {
+#ifdef BFBAN_TEST_HOOKS
+    const char *fail_stage = getenv("BFBAN_TEST_FAIL_SAVE_STAGE");
+    bool fail_before_rename = fail_stage && strcmp(fail_stage, "before_rename") == 0;
+    bool fail_after_rename = fail_stage && strcmp(fail_stage, "after_rename") == 0;
+#endif
     int r = parent_dir(state_path());
     if (r < 0) return r;
     char temp[PATH_MAX];
@@ -342,7 +384,18 @@ static int save(const struct entry *entries, size_t count)
     if (flush_result != 0 || file_sync_result < 0 || close_result != 0) {
         int e = errno; unlink(temp); return -e;
     }
+#ifdef BFBAN_TEST_HOOKS
+    if (test_number("BFBAN_TEST_FAIL_SAVE_AT", &test_save_calls) < 0 ||
+        fail_before_rename) {
+        unlink(temp);
+        errno = EIO;
+        return -EIO;
+    }
+#endif
     if (rename(temp, state_path()) < 0) { int e = errno; unlink(temp); return -e; }
+#ifdef BFBAN_TEST_HOOKS
+    if (fail_after_rename) return SAVE_DURABILITY_WARNING;
+#endif
     char directory[PATH_MAX];
     if (strlen(state_path()) >= sizeof(directory)) {
         fprintf(stderr, "bfband: warning: state directory path is too long after rename\n");

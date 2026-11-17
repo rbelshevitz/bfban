@@ -56,5 +56,9 @@ install: all $(BUILD_DIR)/etc/bfban/bfban.env $(BUILD_DIR)/etc/systemd/bfband.se
 clean:
 	rm -rf $(BUILD_DIR)
 
-test: all
-	sh scripts/test-faults.sh $(BUILD_DIR)
+TEST_BUILD_DIR ?= $(BUILD_DIR)-test
+TEST_CFLAGS ?= -DBFBAN_TEST_HOOKS
+
+test:
+	$(MAKE) BUILD_DIR=$(TEST_BUILD_DIR) CFLAGS="$(CFLAGS) $(TEST_CFLAGS)" all
+	sh scripts/test-faults.sh $(TEST_BUILD_DIR)

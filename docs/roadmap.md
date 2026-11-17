@@ -53,6 +53,8 @@ applies them to the bpfilter chain.
 - [x] Rocky Linux 10, Debian 13, and Ubuntu 24.04 validation procedure.
 - [x] TCP backlog, buffer, SYN-cookie, and memory guidance.
 - [x] English and Russian deployment, Fail2ban, rollback, and troubleshooting docs.
+- [x] Test-only fault injection for backend calls and state-save boundaries,
+  with explicit root-only `PASS`/`SKIP` reporting in `make test`.
 
 ## Release gates
 
