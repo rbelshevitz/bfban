@@ -33,6 +33,11 @@ Fail2ban / CrowdSec / свой агент
 `libbpfilter` найден через `pkg-config`, демон использует прямой C API; иначе
 работает запасной режим через `bfban`/`bfcli`.
 
+Названия компонентов означают следующее: `bfban` — прямой CLI-backend для
+ручных и пакетных обновлений, `bfband` — постоянно работающий демон, а
+`bfbandctl` — клиент его Unix-сокета. Поставляемый action Fail2ban запускает
+именно `bfbandctl`.
+
 Проект распространяется под GPL-2.0-only.
 
 Исходный движок находится в [libbpfilter](https://bpfilter.io/developers/modules/libbpfilter/libbpfilter.html),
@@ -66,8 +71,9 @@ sudo bfcli ruleset get
    `bfbandctl add IP [TTL]` и `bfbandctl remove IP`. Команда `bfban add`
    добавляет постоянную запись через CLI, если TTL демона не нужен.
 2. **Fail2ban.** Установите Fail2ban, включите поставляемый action `bfban` и
-   задайте в jail `banaction = bfban`. Fail2ban читает логи и выбирает пороги;
-   `bfband` только применяет полученные команды блокировки и разблокировки.
+   задайте в jail `banaction = bfban`. Здесь `bfban` — имя файла action, а не
+   команда, которую Fail2ban запускает напрямую. Action вызывает
+   `bfbandctl add/remove`, а `bfband` применяет полученные команды.
 3. **Список угроз.** Запустите `scripts/fetch-threat-feed.sh` без `--apply`,
    проверьте полученный файл и список разрешённых адресов, затем примените его
    с `--apply`.
@@ -518,6 +524,18 @@ sudo bfban remove 203.0.113.10
 
 ### 5. Подключить Fail2ban
 
+Путь передачи блокировки выглядит так:
+
+```text
+лог sshd/nginx → фильтр и jail Fail2ban
+    → actionban: bfbandctl add <ip>
+    → Unix-сокет bfband → набор bpfilter/eBPF → DROP
+```
+
+Когда заканчивается `bantime`, Fail2ban вызывает `actionunban`:
+`bfbandctl remove <ip>`. Поэтому action не передаёт TTL: срок блокировки
+контролирует сам Fail2ban.
+
 Создайте `/etc/fail2ban/jail.d/sshd-bfban.local`:
 
 ```ini
@@ -816,7 +834,8 @@ LPM в [Linux LPM-trie documentation](https://docs.kernel.org/bpf/map_lpm_trie.h
 
 ## Как это интегрируется с Fail2ban
 
-Fail2ban и `bfban` выполняют разные роли:
+Fail2ban принимает решение, а `bfband` применяет его через клиент
+`bfbandctl`:
 
 ```text
 лог sshd/nginx/etc.
@@ -828,28 +847,29 @@ Fail2ban filter
 Fail2ban jail принимает решение о бане
         │
         ├── actionstart  → создать цепочку bpfilter и список блокировок
-        ├── actionban    → добавить IP в banlist
-        ├── actionunban  → удалить IP из banlist
+        ├── actionban    → bfbandctl add <ip>
+        ├── actionunban  → bfbandctl remove <ip>
         └── actionstop   → удалить цепочку
 ```
 
-`bfban` не читает логи и не знает, почему адрес был заблокирован. Он получает
-от Fail2ban только команды. Например, при пяти неудачных SSH-входах за десять
-минут Fail2ban вызывает:
+`bfban` и `bfband` не читают логи и не знают, почему адрес был заблокирован.
+Они получают от Fail2ban только команды. Например, при пяти неудачных
+SSH-входах за десять минут action вызывает:
 
 ```sh
-bfban add 203.0.113.10
+bfbandctl add 203.0.113.10
 ```
 
 Когда заканчивается `bantime`, Fail2ban вызывает:
 
 ```sh
-bfban remove 203.0.113.10
+bfbandctl remove 203.0.113.10
 ```
 
-В текущей версии эти команды вызывают `bfcli chain update-set`. Поэтому
-eBPF-программа остаётся загруженной, а изменяется только содержимое
-соответствующего именованного набора.
+`bfband` принимает эти команды через Unix-сокет. Затем он либо обновляет
+набор через прямой C API `libbpfilter`, либо запускает запасной путь
+`bfban` → `bfcli chain update-set`. Поэтому eBPF-программа остаётся
+загруженной, а изменяется только содержимое соответствующего набора.
 Fail2ban уже управляет временем жизни бана; отдельный TTL в MVP не нужен.
 
 ### Установка action
@@ -892,7 +912,7 @@ sudo systemctl restart fail2ban
 sudo fail2ban-client status sshd-bfban
 ```
 
-При старте jail action выполнит `bfban init`. При бане и разбане IP будут
+При старте jail action выполнит `bfbandctl init`. При бане и разбане IP будут
 вызваны `actionban` и `actionunban` из
 `/etc/fail2ban/action.d/bfban.conf`.
 

@@ -11,6 +11,11 @@ replace the host firewall.
 
 The project is licensed under GPL-2.0-only.
 
+The names are deliberately separate: `bfban` is the direct CLI backend,
+`bfband` is the long-running daemon, and `bfbandctl` is the Unix-socket client.
+The supplied Fail2ban action runs `bfbandctl`; `banaction = bfban` refers to
+the action file name, not to a direct invocation of the `bfban` binary.
+
 ```text
 Fail2ban / CrowdSec / security agent
                  |
@@ -45,7 +50,7 @@ through the direct C API. If it is unavailable, it falls back to the installed
 | Fail2ban/CrowdSec | detect activity and decide that an address should be blocked |
 | `nftables`/`iptables` | general-purpose firewall engines; they can also hold dynamic sets |
 | `bpfilter` | packet-filtering engine that loads chains, rules, and sets as eBPF programs |
-| `bfband`/`bfban` | daemon and client that manage dynamic bans, TTLs, state, and bpfilter sets |
+| `bfband`/`bfbandctl` | daemon and client that manage dynamic bans, TTLs, state, and bpfilter sets |
 | `NF_LOCAL_IN`/XDP | kernel hooks where the filtering chain is attached |
 
 There are two valid designs:
@@ -58,7 +63,7 @@ Fail2ban → bfband → bpfilter set/chain → NF_LOCAL_IN or XDP
 🔀 `bfban` is therefore not a second firewall that must be placed on top of
 `nftables`. It is an alternative enforcement backend for the dynamic blocklist.
 The host can still use `nftables` for its ordinary firewall policy while
-`bfban` handles a separate changing list.
+`bfban` handles a separate, frequently changing list.
 
 ### Where eBPF is used
 
@@ -70,7 +75,7 @@ a user-space process. `bfbandctl list` shows the control-plane state, while
 `bfcli ruleset get` shows the loaded filtering chain and its sets.
 
 ✅ The practical reason to use `bfban` is its management path: one daemon API,
-TTLs and persistent state, restart reconciliation, exact IP/CIDR sets, and the
+TTL handling, persistent state, restart reconciliation, exact IP/CIDR sets, and the
 option to attach the chain at an XDP hook. If a direct Fail2ban-to-nftables
 set already provides everything required, there is no need to add `bfban`.
 
@@ -210,8 +215,8 @@ this on the only management interface: a bad XDP program or an incorrect
 blocklist can cut off administration. `bpftool net` or `ip -details link` may
 show whether the attachment is native (`xdpdrv`) or generic (`xdpgeneric`);
 record the actual mode and test both modes separately when measuring
-performance. `bfban` supports both native and generic attachment, but does not expose a
-separate mode switch. Verify which mode the kernel and driver actually attached.
+performance. `bfban` supports both native and generic attachment, but does not
+expose a separate mode switch. Verify which mode the kernel and driver actually use.
 
 For a real functional test, add the source address of a second machine, not
 the server's own address, and verify both the packet behavior and the chain
@@ -520,6 +525,18 @@ second SSH session. `bfban flush` removes the dynamic chain contents.
 
 ### 5. Connect Fail2ban
 
+The ban path is:
+
+```text
+sshd/nginx log → Fail2ban filter and jail
+    → actionban: bfbandctl add <ip>
+    → bfband Unix socket → bpfilter/eBPF set → DROP
+```
+
+When `bantime` expires, Fail2ban runs `actionunban` and sends
+`bfbandctl remove <ip>`. The action does not pass a TTL; Fail2ban owns the ban
+lifetime.
+
 The installed action maps Fail2ban events to the daemon:
 
 ```text
@@ -653,7 +670,7 @@ all eBPF code is faster:
 - XDP is attached at the receive path before the normal Linux network stack;
   native driver mode can avoid work that would otherwise happen later. Generic
   XDP/SKB mode has different costs and must be measured separately.
-- Linux can JIT eBPF instructions to native machine code on supported
+- Linux can JIT-compile eBPF instructions to native machine code on supported
   architectures. JIT state and kernel configuration must be recorded in a
   benchmark; it is not safe to assume identical code generation everywhere.
 - Exact address sets use hash-style storage. Prefix sets use longest-prefix

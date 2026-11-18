@@ -24,8 +24,22 @@ static const char *socket_path(void)
 int main(int argc, char **argv)
 {
     signal(SIGPIPE, SIG_IGN);
+    if (argc == 2 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
+        printf("Usage: bfbandctl COMMAND [ARGUMENT]\n\n"
+               "Commands:\n"
+               "  ping                 Check that bfband is reachable\n"
+               "  init                 Reconcile daemon and kernel state\n"
+               "  add IP [TTL]         Add an address; TTL 0 means no daemon expiry\n"
+               "  remove IP            Remove an address\n"
+               "  add-many FILE        Add addresses from a file\n"
+               "  list                 Show daemon state\n"
+               "  flush                Remove all dynamic bans\n\n"
+               "Environment: BFBAN_SOCKET\n");
+        return 0;
+    }
     if (argc < 2 || argc > 4) {
-        fprintf(stderr, "Usage: bfbandctl ping|init|add IP [TTL]|add-many FILE|remove IP|list|flush\n");
+        fprintf(stderr, "Usage: bfbandctl COMMAND [ARGUMENT]\n"
+                        "Try 'bfbandctl --help' for details.\n");
         return 2;
     }
     char request[REQUEST_SIZE];

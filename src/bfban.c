@@ -92,7 +92,15 @@ static int normalize_address(const char *input, char *output, size_t size)
 static void usage(FILE *stream)
 {
     fprintf(stream,
-            "Usage: bfban init|add ADDRESS|add-many FILE|remove ADDRESS|list|flush\n"
+            "Usage: bfban COMMAND [ARGUMENT]\n\n"
+            "Commands:\n"
+            "  init                 Create or reconcile the bpfilter chain\n"
+            "  add ADDRESS          Add a persistent address or CIDR\n"
+            "  remove ADDRESS       Remove an address or CIDR\n"
+            "  add-many FILE        Add addresses from a file\n"
+            "  list                 Show the local state file\n"
+            "  flush                Remove all dynamic bans\n\n"
+            "This is the direct CLI backend. Fail2ban normally uses bfbandctl.\n"
             "Environment: BFBAN_BPFCLI, BFBAN_STATE, BFBAN_CHAIN, BFBAN_HOOK\n");
 }
 
@@ -370,6 +378,10 @@ static int flush_all(void)
 
 int main(int argc, char **argv)
 {
+    if (argc == 2 && (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
+        usage(stdout);
+        return 0;
+    }
     if (argc < 2) {
         usage(stderr);
         return 2;
