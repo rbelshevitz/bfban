@@ -2,11 +2,11 @@
 
 [English](README.md) | [Русский](README.ru.md)
 
-`bfban` is a Linux service for dynamic IP blocklists. Fail2ban, CrowdSec, an
+🛡️ `bfban` is a Linux service for dynamic IP blocklists. Fail2ban, CrowdSec, an
 operator, or another security agent sends it IP/CIDR decisions; `bfban` keeps
 the list, TTLs, and state, then applies them through bpfilter/eBPF.
 
-In short: the detector decides, `bfban` enforces. It does not read logs or
+🎯 In short: the detector decides, `bfban` enforces. It does not read logs or
 replace the host firewall.
 
 The project is licensed under GPL-2.0-only.
@@ -24,7 +24,7 @@ Fail2ban / CrowdSec / security agent
              packet DROP
 ```
 
-The current MVP provides:
+📦 The current MVP provides:
 
 - `bfban`: IPv4, IPv6, and CIDR management;
 - `bfband`: Unix-socket daemon, state recovery, and optional TTLs;
@@ -32,13 +32,13 @@ The current MVP provides:
 - `bfobserve`: a read-only AF_PACKET top-N traffic observer;
 - systemd and Fail2ban integration files.
 
-When `libbpfilter` is available through `pkg-config`, the daemon updates sets
+⚙️ When `libbpfilter` is available through `pkg-config`, the daemon updates sets
 through the direct C API. If it is unavailable, it falls back to the installed
 `bfban`/`bfcli` tools. Select the behavior with `BFBAN_DIRECT=auto|yes|no`.
 
 ## Roles: Fail2ban, nftables, bpfilter, and bfban
 
-These components have different roles:
+🧩 These components have different roles:
 
 | Component | Role |
 |---|---|
@@ -55,28 +55,28 @@ Fail2ban → nftables set → nftables hook
 Fail2ban → bfband → bpfilter set/chain → NF_LOCAL_IN or XDP
 ```
 
-`bfban` is therefore not a second firewall that must be placed on top of
+🔀 `bfban` is therefore not a second firewall that must be placed on top of
 `nftables`. It is an alternative enforcement backend for the dynamic blocklist.
 The host can still use `nftables` for its ordinary firewall policy while
 `bfban` handles a separate changing list.
 
 ### Where eBPF is used
 
-`bfband` is the control path, not the packet path. When a ban is added, the
+🧠 `bfband` is the control path, not the packet path. When a ban is added, the
 daemon updates a bpfilter set. bpfilter generates and loads a small eBPF
 program and its kernel maps (internal tables). After that, each packet is
 checked at the selected hook; the packet does not go through `bfband` or start
 a user-space process. `bfbandctl list` shows the control-plane state, while
 `bfcli ruleset get` shows the loaded filtering chain and its sets.
 
-The practical reason to use `bfban` is its management path: one daemon API,
+✅ The practical reason to use `bfban` is its management path: one daemon API,
 TTLs and persistent state, restart reconciliation, exact IP/CIDR sets, and the
 option to attach the chain at an XDP hook. If a direct Fail2ban-to-nftables
 set already provides everything required, there is no need to add `bfban`.
 
 ### What this proof of concept claims
 
-This project does not claim that `bfban` is a drop-in replacement for
+🔬 This project does not claim that `bfban` is a drop-in replacement for
 `nftables`. The proof of concept validates a narrower claim: bpfilter can
 enforce a dynamic IP/port blocklist (L3/L4) on a real host, while `bfban`
 manages updates, TTLs, state recovery, and CIDR sets. A full firewall
@@ -86,7 +86,7 @@ and measured feature and performance parity. Those are outside v1.
 
 ### Why use this backend?
 
-There are two different kinds of benefit: how packets are filtered and how the
+📌 There are two different kinds of benefit: how packets are filtered and how the
 changing blocklist is operated.
 
 #### Packet-filtering benefits
@@ -143,11 +143,27 @@ management path while testing.
 
 ### XDP compatibility check
 
-XDP does not work in the same mode on every network interface. Native XDP
-requires support from the kernel driver. Linux also has generic XDP, which runs
-later in the receive path and is broadly compatible, but usually gives up the
-main early-ingress benefit. A driver name alone is not enough to decide which
-mode is available.
+🔌 `bfban` supports both XDP modes. Native XDP requires support from the kernel
+driver. Generic XDP is available on a much wider range of interfaces and runs
+later in the receive path. The kernel, driver, and attachment path determine
+which mode is used; a driver name alone is not enough to decide that.
+
+| Mode | Where it runs | Practical effect |
+|---|---|---|
+| Native XDP (`xdpdrv`) | In the NIC driver's receive path, before the packet becomes an `skb` | Earliest drop and usually the lowest host overhead; requires driver support |
+| Generic XDP (`xdpgeneric`) | In the regular Linux receive path, after the packet has been turned into an `skb` | Broad compatibility and useful for testing; it loses part of the early-ingress benefit and usually has lower PPS |
+| Hardware offload | In supported NIC hardware | Not selected by `bfban`; requires a specific NIC, driver, and offload support |
+
+The filtering rule is the same, but the execution point is different. Native
+XDP can avoid work that generic XDP has already incurred, such as allocating
+and passing an `skb` through part of the network stack. Generic XDP is still
+real XDP and can be useful when native support is unavailable, but it should
+not be presented as equivalent performance.
+
+Other compatibility details matter too: native support can depend on the
+kernel's driver version, MTU and XDP-fragment support, existing XDP programs,
+and driver-specific restrictions. Hardware offload is a separate feature and
+is not the normal `bfban` path.
 
 First inspect the actual interface and driver:
 
@@ -194,12 +210,36 @@ this on the only management interface: a bad XDP program or an incorrect
 blocklist can cut off administration. `bpftool net` or `ip -details link` may
 show whether the attachment is native (`xdpdrv`) or generic (`xdpgeneric`);
 record the actual mode and test both modes separately when measuring
-performance.
+performance. `bfban` supports both native and generic attachment, but does not expose a
+separate mode switch. Verify which mode the kernel and driver actually attached.
 
 For a real functional test, add the source address of a second machine, not
 the server's own address, and verify both the packet behavior and the chain
 counters. A successful attachment alone does not prove that the intended
 traffic is being dropped.
+
+#### Common drivers with native XDP support
+
+Native support is a property of the Linux driver, not just the NIC model. The
+following drivers are common examples with upstream native-XDP support on
+recent kernels:
+
+| Vendor or platform | Drivers |
+|---|---|
+| Intel | `igb`, `igc`, `i40e`, `ixgbe`, `ixgbevf`, `ice` |
+| Mellanox/NVIDIA | `mlx4`, `mlx5` |
+| Broadcom | `bnxt_en` |
+| Amazon EC2 | `ena` |
+| Google Cloud | `gve` |
+| QLogic | `qede` |
+| Netronome | `nfp` |
+| VMware and virtual machines | `vmxnet3`, `virtio_net`, `veth`, `tun` |
+
+This is a guide, not a compatibility promise: kernel version, vendor
+backports, driver configuration, MTU, and an existing BPF attachment can
+change the result. Compare the `driver:` line from `ethtool -i IFACE` with the
+driver list, then perform the real attach test. The maintained driver table is
+in the [eBPF XDP documentation](https://docs.ebpf.io/linux/program-type/BPF_PROG_TYPE_XDP/).
 
 ## What is implemented
 
