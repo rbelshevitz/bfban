@@ -87,10 +87,16 @@ provides everything required, there is no need to add `bfban`.
 🔬 This project does not claim that `bfban` is a drop-in replacement for
 `nftables`. The proof of concept validates a narrower claim: bpfilter can
 enforce a dynamic IP/port blocklist (L3/L4) on a real host, while `bfban`
-manages updates, TTLs, state recovery, and CIDR sets. A full firewall
-replacement would also
-need comparable stateful filtering, NAT, routing, logging, rich match support,
-and measured feature and performance parity. Those are outside v1.
+manages updates, TTLs, state recovery, and CIDR sets. Stateful filtering, NAT,
+routing, logging, advanced matching, and measured feature and performance
+parity are outside the 0.1 release.
+
+`bfban` operates primarily at OSI layers 3 and 4: it matches IPv4/IPv6
+addresses and CIDR prefixes, IP protocols, and TCP/UDP ports. It does not
+inspect application payloads at layer 7, provide layer-2 switching, or replace
+conntrack, NAT, or a general stateful firewall. `NF_LOCAL_IN` and XDP are hook
+locations in the Linux datapath; choosing one does not change the matching
+layer.
 
 ### Why use this backend?
 
@@ -245,9 +251,9 @@ recent kernels:
 
 This is a guide, not a compatibility promise: kernel version, vendor
 backports, driver configuration, MTU, and an existing BPF attachment can
-change the result. Compare the `driver:` line from `ethtool -i IFACE` with the
-driver list, then perform the real attach test. The maintained driver table is
-in the [eBPF XDP documentation](https://docs.ebpf.io/linux/program-type/BPF_PROG_TYPE_XDP/).
+change the result. Before enabling native XDP, check the **Driver support**
+section in the [eBPF XDP documentation](https://docs.ebpf.io/linux/program-type/BPF_PROG_TYPE_XDP/#driver-support), compare the `driver:` line from
+`ethtool -i IFACE`, and perform the real attach test.
 
 ## What is implemented
 
@@ -260,7 +266,7 @@ in the [eBPF XDP documentation](https://docs.ebpf.io/linux/program-type/BPF_PROG
 | systemd state recovery and TTL handling | implemented |
 | `bfobserve` interface listing, top-N, JSON, and operator suggestions | implemented using AF_PACKET |
 | Open-addressing daemon index for fast ADD/DEL/TTL lookup | implemented |
-| Per-source eBPF/XDP telemetry, automatic detection, and per-jail namespaces | out of scope for v1 |
+| Per-source eBPF/XDP telemetry, automatic detection, and per-jail namespaces | out of scope for 0.1 |
 
 The release checklist is [`docs/roadmap.md`](docs/roadmap.md).
 

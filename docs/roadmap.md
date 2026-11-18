@@ -1,16 +1,16 @@
 # bfban roadmap and delivery status
 
-This document is intentionally finite. It records what is already delivered
-for v1 and the real-host baseline that has been validated. It is not an
+This document is intentionally finite. It records what is already delivered for
+the 0.1 release and the real-host baseline that has been validated. It is not an
 open-ended feature wishlist.
 
-## v1 scope
+## 0.1 scope
 
-`bfban` v1 is a Linux dynamic L3/L4 enforcement backend for bpfilter. The
-daemon is `bfband`; Fail2ban and other agents may make decisions, while
-`bfband` applies them to the bpfilter chain. v1 is not a full replacement for
-`nftables`: stateful firewall policy, NAT, routing, and general-purpose rule
-parity are outside its scope.
+`bfban` 0.1 release is a Linux dynamic L3/L4 enforcement backend for bpfilter.
+The daemon is `bfband`; Fail2ban and other agents may make decisions, while
+`bfband` applies them to the bpfilter chain. The 0.1 release is not a full
+replacement for `nftables`: stateful firewall policy, NAT, routing, and
+general-purpose rule parity are outside its scope.
 
 ## Delivered
 
@@ -82,7 +82,7 @@ state-file rename cannot be one physical transaction. A failed rollback is
 reported and the next daemon initialization reconciles the state with the
 kernel chain.
 
-## Explicitly outside v1
+## Explicitly outside 0.1
 
 - Per-jail bpfilter namespaces.
 - Automatic attack classification or automatic banning.
@@ -91,5 +91,5 @@ kernel chain.
 - Upstream DDoS scrubbing or provider coordination.
 - Stateful firewall, NAT, conntrack, or rate-limiting replacement.
 
-These may be considered for a separate v2 design after v1 measurements; they
+These may be considered for a separate 0.2 design after 0.1 measurements; they
 are not prerequisites for the daemon/Fail2ban release.

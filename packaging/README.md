@@ -5,8 +5,8 @@ RHEL 10 and Rocky Linux 10.
 
 The target is intentionally EL10. EL9 can compile the userspace binaries, but
 its stock 5.14 kernel is below bpfilter's 6.6+ runtime requirement. Use EL10
-for the package build and runtime validation, or use a separately managed
-6.6+ kernel only for experiments.
+as the supported build and runtime target; use a separately managed 6.6+ kernel
+on EL9 only for experiments.
 
 ## Native Rocky Linux 10 build
 
