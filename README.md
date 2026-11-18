@@ -321,7 +321,7 @@ bpfilter: DROP at the selected kernel hook
 
 | Situation | What bfban does | What it cannot do |
 |---|---|---|
-| Known malicious IP or CIDR | applies an IP/port blocking entry | discover the IOC by itself |
+| Known malicious IP or CIDR | applies an IP/port blocking entry | discover an IOC (indicator of compromise) by itself |
 | SSH/web brute force | receives a Fail2ban decision and enforces it | parse logs or choose thresholds |
 | High-PPS source visible on the host | `bfobserve` shows top sources; operator can apply a ban | guarantee every packet is visible or auto-classify an attack |
 | Distributed/spoofed flood | can drop known sources at the chosen hook | stop spoofed sources or restore a saturated uplink |
