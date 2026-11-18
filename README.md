@@ -3,8 +3,9 @@
 [English](README.md) | [Русский](README.ru.md)
 
 🛡️ `bfban` is a Linux service for dynamic IP blocklists. Fail2ban, CrowdSec, an
-operator, or another security agent sends it IP/CIDR decisions; `bfban` keeps
-the list, TTLs, and state, then applies them through bpfilter/eBPF.
+operator, or another security agent submits IP/CIDR block decisions to it;
+`bfban` maintains the list, optional TTLs, and persistent state, then applies
+the decisions through bpfilter/eBPF.
 
 🎯 In short: the detector decides, `bfban` enforces. It does not read logs or
 replace the host firewall.
@@ -74,10 +75,12 @@ checked at the selected hook; the packet does not go through `bfband` or start
 a user-space process. `bfbandctl list` shows the control-plane state, while
 `bfcli ruleset get` shows the loaded filtering chain and its sets.
 
-✅ The practical reason to use `bfban` is its management path: one daemon API,
-TTL handling, persistent state, restart reconciliation, exact IP/CIDR sets, and the
-option to attach the chain at an XDP hook. If a direct Fail2ban-to-nftables
-set already provides everything required, there is no need to add `bfban`.
+✅ The practical reason to use `bfban` is its management path: a single daemon API,
+optional daemon-side TTLs, persistent state, restart reconciliation, exact
+IP/CIDR sets, and the option to attach the chain at an XDP hook. With the
+supplied Fail2ban action, Fail2ban remains responsible for the ban lifetime and
+sends an explicit unban command. If a direct Fail2ban-to-nftables set already
+provides everything required, there is no need to add `bfban`.
 
 ### What this proof of concept claims
 
@@ -98,21 +101,21 @@ changing blocklist is operated.
 
 | Benefit | What it means in practice | Limitation |
 |---|---|---|
-| One stable chain, mutable sets | Adding or removing an address updates set data instead of building one rule per ban | nftables sets provide a similar model |
-| CIDR prefix matching | A network such as `203.0.113.0/24` is matched as one prefix, not expanded into 256 addresses | This is for IP/port blocking, not arbitrary firewall policy |
-| Early ingress option | With XDP, a supported interface can drop an incoming packet before the normal network stack and Netfilter | XDP is ingress-only, driver-dependent, and not automatically faster |
-| eBPF execution | bpfilter translates the chain into a kernel BPF program and maps; the kernel executes the decision on the packet path | This project has not established a performance win over nftables |
+| ⚡ One stable chain, mutable sets | Adding or removing an address updates set data instead of building one rule per ban | nftables sets provide a similar model |
+| ⚡ CIDR prefix matching | A network such as `203.0.113.0/24` is matched as one prefix, not expanded into 256 addresses | This is for IP/port blocking, not arbitrary firewall policy |
+| ⚡ Early ingress option | With XDP, a supported interface can drop an incoming packet before the normal network stack and Netfilter | XDP is ingress-only, driver-dependent, and not automatically faster |
+| ⚡ eBPF execution | bpfilter translates the chain into a kernel BPF program and maps; the kernel executes the decision on the packet path | This project has not established a performance win over nftables |
 
 #### Management benefits
 
 | Problem | What `bfban` provides |
 |---|---|
-| Several producers need to submit bans | One Unix-socket API for Fail2ban, CrowdSec, feeds, and operators |
-| Bans are short-lived and change often | Central TTL handling, state persistence, and restart reconciliation |
-| The list contains both addresses and networks | Separate exact and CIDR/LPM sets without expanding networks |
-| Updates must not grow a rule chain per address | One stable bpfilter chain with mutable set contents |
-| The enforcement point matters | The same list can be attached at `NF_LOCAL_IN` or explicitly selected XDP |
-| A failed update must be recoverable | Bounded requests, state durability, rollback, and kernel/state reconciliation |
+| ⚡ Several producers need to submit bans | One Unix-socket API for Fail2ban, CrowdSec, feeds, operators, and custom agents; each source still needs a small adapter or client |
+| ⚡ Bans are short-lived and change often | Optional daemon-side TTLs, state persistence, and restart reconciliation; the supplied Fail2ban action leaves ban-lifetime management to Fail2ban |
+| ⚡ The list contains both addresses and networks | Separate exact and CIDR/LPM sets without expanding networks |
+| ⚡ Updates must not grow a rule chain per address | One stable bpfilter chain with mutable set contents |
+| ⚡ The enforcement point matters | The same list can be attached at `NF_LOCAL_IN` or explicitly selected XDP |
+| ⚡ A failed update must be recoverable | Bounded requests, state durability, rollback, and kernel/state reconciliation |
 
 `nftables` can already provide some of these pieces, including sets and element
 timeouts. `bfban` is useful when the daemon-managed lifecycle, one API for
@@ -486,6 +489,10 @@ fail.
 The bpfilter engine and C library are documented in the official
 [`libbpfilter` documentation](https://bpfilter.io/developers/modules/libbpfilter/libbpfilter.html).
 The upstream source is the [bpfilter GitHub repository](https://github.com/facebook/bpfilter).
+
+For the supported RHEL 10 / Rocky Linux 10 RPM build, see
+[`packaging/README.md`](packaging/README.md). The helper refuses native EL9
+builds and also supports a clean Mock build.
 
 ### 3. Start the systemd daemon
 
