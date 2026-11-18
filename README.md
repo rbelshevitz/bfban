@@ -160,6 +160,16 @@ sudo bpftool feature probe dev "$IFACE"
 printf 'ifindex=%s\n' "$IFINDEX"
 ```
 
+The repository also provides a read-only preflight helper:
+
+```sh
+sudo ./scripts/check-xdp.sh eno1
+```
+
+It prints the interface index, link and driver details, kernel/device eBPF
+probes, and any current BPF network attachment. It does not attach a program
+or change the firewall.
+
 `bpftool feature probe dev` reports eBPF-related device features; it is a
 preflight check, not proof that this exact bpfilter chain will attach. The
 decisive test is to attach the real chain on a disposable or test interface.
