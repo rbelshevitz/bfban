@@ -55,12 +55,22 @@ int main(int argc, char **argv)
     else return 2;
 
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) return 1;
+    if (fd < 0) {
+        fprintf(stderr, "bfbandctl: cannot create daemon socket: %s\n", strerror(errno));
+        return 1;
+    }
     struct sockaddr_un addr = {.sun_family = AF_UNIX};
-    if (strlen(socket_path()) >= sizeof(addr.sun_path)) return 1;
+    if (strlen(socket_path()) >= sizeof(addr.sun_path)) {
+        fprintf(stderr, "bfbandctl: cannot connect to daemon socket '%s': path is too long\n",
+                socket_path());
+        close(fd);
+        return 1;
+    }
     strcpy(addr.sun_path, socket_path());
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        fprintf(stderr, "bfbandctl: %s\n", strerror(errno));
+        fprintf(stderr, "bfbandctl: cannot connect to daemon socket '%s': %s\n",
+                socket_path(), strerror(errno));
+        close(fd);
         return 1;
     }
     dprintf(fd, "%s\n", request);

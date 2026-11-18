@@ -29,7 +29,7 @@
 
 #define SOCKET_PATH "/run/bfban/bfban.sock"
 #define STATE_PATH "/var/lib/bfban/daemon.state"
-#define BFBAN_PATH "/usr/local/sbin/bfban"
+#define BFBAN_PATH "/usr/sbin/bfban"
 #define MAX_BANS 65536
 #define MAX_KEY 64
 #define BUFSIZE 65536

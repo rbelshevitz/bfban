@@ -2,10 +2,12 @@
 
 [English](README.md) | [Русский](README.ru.md)
 
-`bfban` is a Linux enforcement backend for dynamic IP blocklists. It uses
-`bpfilter`/eBPF sets and exposes an integration path for Fail2ban, CrowdSec,
-and other security agents. It does not parse logs and does not decide whether
-an IP is malicious.
+`bfban` is a Linux service for dynamic IP blocklists. Fail2ban, CrowdSec, an
+operator, or another security agent sends it IP/CIDR decisions; `bfban` keeps
+the list, TTLs, and state, then applies them through bpfilter/eBPF.
+
+In short: the detector decides, `bfban` enforces. It does not read logs or
+replace the host firewall.
 
 The project is licensed under GPL-2.0-only.
 
@@ -34,6 +36,161 @@ When `libbpfilter` is available through `pkg-config`, the daemon updates sets
 through the direct C API. If it is unavailable, it falls back to the installed
 `bfban`/`bfcli` tools. Select the behavior with `BFBAN_DIRECT=auto|yes|no`.
 
+## Roles: Fail2ban, nftables, bpfilter, and bfban
+
+These components have different roles:
+
+| Component | Role |
+|---|---|
+| Fail2ban/CrowdSec | detect activity and decide that an address should be blocked |
+| `nftables`/`iptables` | general-purpose firewall engines; they can also hold dynamic sets |
+| `bpfilter` | packet-filtering engine that loads chains, rules, and sets as eBPF programs |
+| `bfband`/`bfban` | daemon and client that manage dynamic bans, TTLs, state, and bpfilter sets |
+| `NF_LOCAL_IN`/XDP | kernel hooks where the filtering chain is attached |
+
+There are two valid designs:
+
+```text
+Fail2ban → nftables set → nftables hook
+Fail2ban → bfband → bpfilter set/chain → NF_LOCAL_IN or XDP
+```
+
+`bfban` is therefore not a second firewall that must be placed on top of
+`nftables`. It is an alternative enforcement backend for the dynamic blocklist.
+The host can still use `nftables` for its ordinary firewall policy while
+`bfban` handles a separate changing list.
+
+### Where eBPF is used
+
+`bfband` is the control path, not the packet path. When a ban is added, the
+daemon updates a bpfilter set. bpfilter generates and loads a small eBPF
+program and its kernel maps (internal tables). After that, each packet is
+checked at the selected hook; the packet does not go through `bfband` or start
+a user-space process. `bfbandctl list` shows the control-plane state, while
+`bfcli ruleset get` shows the loaded filtering chain and its sets.
+
+The practical reason to use `bfban` is its management path: one daemon API,
+TTLs and persistent state, restart reconciliation, exact IP/CIDR sets, and the
+option to attach the chain at an XDP hook. If a direct Fail2ban-to-nftables
+set already provides everything required, there is no need to add `bfban`.
+
+### What this proof of concept claims
+
+This project does not claim that `bfban` is a drop-in replacement for
+`nftables`. The proof of concept validates a narrower claim: bpfilter can
+enforce a dynamic IP/port blocklist (L3/L4) on a real host, while `bfban`
+manages updates, TTLs, state recovery, and CIDR sets. A full firewall
+replacement would also
+need comparable stateful filtering, NAT, routing, logging, rich match support,
+and measured feature and performance parity. Those are outside v1.
+
+### Why use this backend?
+
+There are two different kinds of benefit: how packets are filtered and how the
+changing blocklist is operated.
+
+#### Packet-filtering benefits
+
+| Benefit | What it means in practice | Limitation |
+|---|---|---|
+| One stable chain, mutable sets | Adding or removing an address updates set data instead of building one rule per ban | nftables sets provide a similar model |
+| CIDR prefix matching | A network such as `203.0.113.0/24` is matched as one prefix, not expanded into 256 addresses | This is for IP/port blocking, not arbitrary firewall policy |
+| Early ingress option | With XDP, a supported interface can drop an incoming packet before the normal network stack and Netfilter | XDP is ingress-only, driver-dependent, and not automatically faster |
+| eBPF execution | bpfilter translates the chain into a kernel BPF program and maps; the kernel executes the decision on the packet path | This project has not established a performance win over nftables |
+
+#### Management benefits
+
+| Problem | What `bfban` provides |
+|---|---|
+| Several producers need to submit bans | One Unix-socket API for Fail2ban, CrowdSec, feeds, and operators |
+| Bans are short-lived and change often | Central TTL handling, state persistence, and restart reconciliation |
+| The list contains both addresses and networks | Separate exact and CIDR/LPM sets without expanding networks |
+| Updates must not grow a rule chain per address | One stable bpfilter chain with mutable set contents |
+| The enforcement point matters | The same list can be attached at `NF_LOCAL_IN` or explicitly selected XDP |
+| A failed update must be recoverable | Bounded requests, state durability, rollback, and kernel/state reconciliation |
+
+`nftables` can already provide some of these pieces, including sets and element
+timeouts. `bfban` is useful when the daemon-managed lifecycle, one API for
+multiple producers, bpfilter integration, or XDP placement is the reason to
+choose it. It is not useful merely because the host needs any firewall at all.
+
+Choose the tool by the job:
+
+| Need | Use |
+|---|---|
+| Stateful firewall policy, NAT, port/service rules | `nftables` (or existing `iptables` rules) |
+| Compatibility with an existing iptables-based setup | `iptables` |
+| Frequent exact-IP/CIDR updates from Fail2ban, CrowdSec, or a feed | `bfban` |
+| A single stable kernel program with mutable blocklist data | `bfban` with bpfilter/eBPF |
+| Filtering before the regular network stack on a supported interface | `bfban` with an explicitly configured XDP hook |
+
+## What is XDP?
+
+XDP (eXpress Data Path) is an early Linux hook for incoming packets. It runs
+before the normal network stack and can return `DROP` before Netfilter and
+conntrack. This can reduce host CPU work for known unwanted sources.
+
+It is an ingress hook, not an outbound filter or a cure for a full provider
+link. Performance depends on the network driver and on native vs generic XDP.
+`bfban` uses it only when explicitly configured:
+
+```sh
+sudo env BFBAN_HOOK='BF_HOOK_XDP{ifindex=2}' /usr/sbin/bfban init
+```
+
+Use the interface index from `bfobserve --list-interfaces`; keep a separate
+management path while testing.
+
+### XDP compatibility check
+
+XDP does not work in the same mode on every network interface. Native XDP
+requires support from the kernel driver. Linux also has generic XDP, which runs
+later in the receive path and is broadly compatible, but usually gives up the
+main early-ingress benefit. A driver name alone is not enough to decide which
+mode is available.
+
+First inspect the actual interface and driver:
+
+```sh
+IFACE=eno1
+IFINDEX=$(cat "/sys/class/net/$IFACE/ifindex")
+ip -details link show dev "$IFACE"
+ethtool -i "$IFACE"
+sudo bpftool feature probe dev "$IFACE"
+printf 'ifindex=%s\n' "$IFINDEX"
+```
+
+`bpftool feature probe dev` reports eBPF-related device features; it is a
+preflight check, not proof that this exact bpfilter chain will attach. The
+decisive test is to attach the real chain on a disposable or test interface.
+Set `BFBAN_HOOK` in `/etc/bfban/bfban.env` to the selected interface, then:
+
+```ini
+BFBAN_HOOK=BF_HOOK_XDP{ifindex=2}
+```
+
+Restart the daemon and initialize the chain:
+
+```sh
+sudo systemctl restart bfband
+sudo /usr/sbin/bfbandctl init
+sudo bpftool net show dev "$IFACE"
+sudo ip -details link show dev "$IFACE"
+```
+
+The output should show an XDP program attached to the interface. If attach
+fails, inspect `journalctl -u bfband` and return to `NF_LOCAL_IN`. Do not test
+this on the only management interface: a bad XDP program or an incorrect
+blocklist can cut off administration. `bpftool net` or `ip -details link` may
+show whether the attachment is native (`xdpdrv`) or generic (`xdpgeneric`);
+record the actual mode and test both modes separately when measuring
+performance.
+
+For a real functional test, add the source address of a second machine, not
+the server's own address, and verify both the packet behavior and the chain
+counters. A successful attachment alone does not prove that the intended
+traffic is being dropped.
+
 ## What is implemented
 
 | Feature | Status |
@@ -47,21 +204,48 @@ through the direct C API. If it is unavailable, it falls back to the installed
 | Open-addressing daemon index for fast ADD/DEL/TTL lookup | implemented |
 | Per-source eBPF/XDP telemetry, automatic detection, and per-jail namespaces | out of scope for v1 |
 
-The practical “wow” features are deliberately operational rather than
-marketing claims: a CIDR prefix is stored as one LPM entry, Fail2ban talks to
-one daemon socket, `bfobserve` shows where traffic is coming from before an
-operator bans it, and state recovery lets the dynamic list survive a daemon
-restart. Automatic detection and upstream DDoS mitigation are outside the
-current scope.
+The release checklist is [`docs/roadmap.md`](docs/roadmap.md).
 
-The finite delivery checklist is [`docs/roadmap.md`](docs/roadmap.md).
+## Practical use
+
+`bfban` needs bpfilter and a running `bfband` service. Fail2ban is optional:
+install it only if Fail2ban will be the source of ban decisions.
+
+Start the service and test one temporary ban:
+
+```sh
+sudo systemctl enable --now bfband.service
+sudo /usr/sbin/bfbandctl init
+sudo /usr/sbin/bfbandctl add 203.0.113.10 60
+sudo /usr/sbin/bfbandctl list
+sudo bfcli ruleset get
+```
+
+There are three common ways to provide decisions:
+
+1. **Manual or custom agent.** Use `bfbandctl add IP [TTL]` and
+   `bfbandctl remove IP`. Use `bfban add` for a persistent CLI-managed entry
+   when no daemon TTL is needed.
+2. **Fail2ban.** Install Fail2ban, enable the supplied `bfban` action, and set
+   `banaction = bfban` in the jail. Fail2ban reads logs and chooses thresholds;
+   `bfband` only applies the resulting ban and unban commands.
+3. **Threat feed.** Run `scripts/fetch-threat-feed.sh` without `--apply`,
+   review the validated file and allowlist, then use `--apply` to submit it.
+
+The service can be inspected with `bfbandctl list` and `bfcli ruleset get`.
+Remove one entry with `bfbandctl remove IP`, or clear the dynamic chain with
+`bfbandctl flush`.
 
 ## Scope of use
 
-Use `bfban` when a Linux edge host needs a dynamic exact-IP or CIDR deny list
+Use `bfban` when a Linux edge host needs a dynamic exact-IP or CIDR blocklist
 fed by Fail2ban, CrowdSec, an operator, or a threat-intelligence feed. The
 daemon centralizes updates, keeps state and TTLs, and applies the decision to
-bpfilter without replacing the host's main firewall.
+the kernel through bpfilter without replacing the host's main firewall.
+
+Fail2ban is optional. It is required only for the supplied Fail2ban action;
+`bfban` can also be driven directly by an operator, a feed, CrowdSec, or a
+custom security agent.
 
 Do not use it as a log detector, a complete stateful firewall, a NAT/conntrack
 replacement, an automatic botnet classifier, or a cure for an already
@@ -87,32 +271,26 @@ bpfilter: DROP at the selected kernel hook
 
 | Situation | What bfban does | What it cannot do |
 |---|---|---|
-| Known malicious IP or CIDR | applies a L3/L4 deny entry | discover the IOC by itself |
+| Known malicious IP or CIDR | applies an IP/port blocking entry | discover the IOC by itself |
 | SSH/web brute force | receives a Fail2ban decision and enforces it | parse logs or choose thresholds |
 | High-PPS source visible on the host | `bfobserve` shows top sources; operator can apply a ban | guarantee every packet is visible or auto-classify an attack |
 | Distributed/spoofed flood | can drop known sources at the chosen hook | stop spoofed sources or restore a saturated uplink |
 | Saturated provider link | provides no local remedy | replace provider filtering/scrubbing |
 
 The default hook is `NF_LOCAL_IN`, so the default profile protects services
-delivered to this host. It is not a router-wide DDoS filter. Here, “early
-ingress” means the receive path of an interface: XDP runs before the regular
-Linux network stack creates and processes the packet as an `skb`, so a DROP can
-happen before Netfilter and conntrack. For earlier ingress drop on a supported
-interface, configure XDP explicitly:
+delivered to this host. It is not a router-wide DDoS filter. For an earlier
+drop on a supported interface, configure XDP as described above:
 
 ```sh
-export BFBAN_HOOK='BF_HOOK_XDP{ifindex=2}'
-sudo bfban init
+sudo env BFBAN_HOOK='BF_HOOK_XDP{ifindex=2}' /usr/sbin/bfban init
 ```
 
-Use the actual interface index from `bfobserve --list-interfaces`, keep a
-management path outside the test interface, and benchmark native and generic
-XDP separately. XDP is an ingress hook on the selected interface, not an
-outbound socket filter. It can reduce host-side work; it cannot increase the
-capacity of an already saturated network link. See [bpfilter hook placement](https://bpfilter.io/usage/explanation/hooks.html)
+Use the interface index from `bfobserve --list-interfaces`, keep a management
+path outside the test interface, and benchmark native and generic XDP
+separately. See [bpfilter hook placement](https://bpfilter.io/usage/explanation/hooks.html)
 and the [XDP research paper](https://doi.org/10.1145/3281411.3281443).
 
-## Why this exists
+## How the dynamic blocklist is stored
 
 Fail2ban is good at detection and ban lifetime management. A firewall backend
 should keep a stable filtering program and update its data, instead of adding
@@ -125,7 +303,7 @@ banlist6      exact IPv6 addresses
 banlist6net   IPv6 CIDR networks
 ```
 
-This is a dynamic L3/L4 deny-list layer, not a replacement for stateful
+This is a dynamic IP/port blocklist layer, not a replacement for stateful
 nftables/iptables policy, NAT, conntrack, or upstream DDoS scrubbing.
 
 ## CIDR blocklists
@@ -225,14 +403,14 @@ sudo ldconfig
 
 ```sh
 cd ~/bfban
-./configure --prefix=/usr/local
+./configure --prefix=/usr
 make
 sudo make install
 ```
 
 `make` uses a separate `build/` directory. The selected prefix is also applied
-to the generated systemd unit and `/etc/bfban/bfban.env`; a non-default prefix
-therefore does not leave `ExecStart` pointing at `/usr/local`.
+to the generated systemd unit and `/etc/bfban/bfban.env`; a custom prefix
+therefore updates `ExecStart` and the tool paths consistently.
 
 The generated environment file points `BFBAN_BPFCLI` at the selected install
 prefix. Override `BFBAN_BPFCLI` in `/etc/bfban/bfban.env` if `bfcli` is
@@ -247,7 +425,7 @@ If bpfilter was built from source but not installed into its configured
 prefix, set `PKG_CONFIG_PATH` to the directory containing `bpfilter.pc` and
 make sure that file's `prefix`, `includedir`, and `libdir` point to the same
 installation tree. A build-directory `.pc` file that still says
-`prefix=/usr/local` may be detected successfully but then make compilation
+an incorrect prefix may be detected successfully but then make compilation
 fail.
 
 The bpfilter engine and C library are documented in the official
@@ -380,6 +558,19 @@ TCP backlog tuning or upstream mitigation when the uplink itself is saturated.
 
 ### 7. Apply CIDR or a threat feed carefully
 
+A threat feed is not a database of all bots. It is a curated list of network
+indicators, usually IP addresses or CIDR networks associated with a specific
+threat: for example, confirmed botnet command-and-control infrastructure or
+known malicious hosting. Feeds are optional inputs; `bfban` does not discover
+them, score them, or verify that an address is still malicious.
+
+The repository's example uses the Feodo Tracker recommended IPv4 list. It is a
+high-confidence, botnet-specific example, not a universal blocklist. Spamhaus
+DROP is a separate CIDR-oriented source that requires its own importer and
+review of the provider's usage terms. Do not turn a country list, ASN list, or
+unreviewed reputation dump into a deny rule: shared hosting, NAT, VPNs, and
+CDNs can create false positives.
+
 ```sh
 sudo bfban add 203.0.113.0/24
 ./scripts/fetch-threat-feed.sh --output=/tmp/feodo.txt
@@ -420,7 +611,7 @@ all eBPF code is faster:
   member addresses.
 - bpfilter's `chain update-set` is an atomic delta operation that preserves
   counters, but bpfilter documents that it regenerates the chain's BPF program
-  with the changed set. The direct API removes userspace process/CLI overhead;
+  with the changed set. The direct API removes user-space process/CLI overhead;
   it is not a promise of zero-cost kernel updates.
 
 The academic basis for the XDP placement and performance trade-offs is:

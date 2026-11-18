@@ -118,7 +118,7 @@ Then build bfban from the SSH checkout:
 ```sh
 git clone git@github.com:rbelshevitz/bfban.git
 cd bfban
-./configure --prefix=/usr/local
+./configure --prefix=/usr
 make clean all
 sudo make install
 ```

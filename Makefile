@@ -3,7 +3,7 @@ CFLAGS ?= -O2 -g -std=c17 -Wall -Wextra -Wpedantic
 
 -include config.mk
 
-PREFIX ?= /usr/local
+PREFIX ?= /usr
 BUILD_DIR ?= build
 BFBAN_DIRECT_CFLAGS ?=
 BFBAN_DIRECT_LIBS ?=

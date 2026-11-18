@@ -6,7 +6,7 @@ Before=fail2ban.service
 [Service]
 Type=simple
 EnvironmentFile=-/etc/bfban/bfban.env
-ExecStart=/usr/local/sbin/bfband
+ExecStart=/usr/sbin/bfband
 Restart=on-failure
 RuntimeDirectory=bfban
 RuntimeDirectoryMode=0770
